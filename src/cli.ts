@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises'
 import { Command } from 'commander'
 import { z } from 'zod'
 import { clearBilibiliAuth, loadAuth } from './core/auth-store.js'
-import { getConfigDir, loadConfig, saveConfig, setConfigValue } from './core/config.js'
+import { createBilibiliQRSession, pollBilibiliQRSession, waitForBilibiliQRLogin } from './core/bilibili-auth.js'
+import { getConfigDir, loadConfig, setConfigValue } from './core/config.js'
 import { resolvePlatform, type PlatformId } from './core/registry.js'
 import { runDownloadPlan, summarizeDownloadEvents } from './core/downloader.js'
 import { DownloadPlanSchema, type DownloadOptions, type ResolveContext } from './core/types.js'
@@ -193,22 +194,47 @@ login
   .command('create')
   .option('--json', 'print JSON')
   .description('create a QR login session')
-  .action(() => {
-    printError('bilibili QR login create is not implemented yet (planned M4a)')
-    process.exitCode = 1
+  .action(async (opts) => {
+    try {
+      const session = await createBilibiliQRSession({ terminal: !opts.json })
+      if (opts.json) return printJson(session)
+      if (session.terminal) process.stdout.write(`${session.terminal}\n`)
+      process.stdout.write(`URL: ${session.url}\nQR image: ${session.qrPath}\nSession: ${session.sessionId}\n`)
+    } catch (err) {
+      printError(err)
+      process.exitCode = 1
+    }
   })
 login
   .command('poll')
   .argument('<sessionId>')
   .option('--json', 'print JSON')
   .description('poll a QR login session')
-  .action(() => {
-    printError('bilibili QR login poll is not implemented yet (planned M4a)')
-    process.exitCode = 1
+  .action(async (sessionId: string, opts) => {
+    try {
+      const result = await pollBilibiliQRSession(sessionId)
+      if (opts.json) return printJson(result)
+      process.stdout.write(`${result.message}${result.loggedIn ? ' (logged in)' : ''}\n`)
+    } catch (err) {
+      printError(err)
+      process.exitCode = 1
+    }
   })
-login.option('--json', 'print JSON').action(() => {
-  printError('bilibili blocking QR login is not implemented yet (planned M4a)')
-  process.exitCode = 1
+login.option('--json', 'print JSON').action(async (opts) => {
+  try {
+    const session = await createBilibiliQRSession({ terminal: !opts.json })
+    if (opts.json) printJson(session)
+    else {
+      if (session.terminal) process.stdout.write(`${session.terminal}\n`)
+      process.stdout.write(`URL: ${session.url}\nQR image: ${session.qrPath}\nWaiting for confirmation...\n`)
+    }
+    const result = await waitForBilibiliQRLogin(session.sessionId)
+    if (opts.json) printJson(result)
+    else process.stdout.write('Bilibili login successful\n')
+  } catch (err) {
+    printError(err)
+    process.exitCode = 1
+  }
 })
 bilibili.addCommand(login)
 bilibili.command('status').option('--json', 'print JSON').action(async (opts) => {
