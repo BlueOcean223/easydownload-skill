@@ -371,12 +371,20 @@ async function writeStreamToFile(
 ): Promise<number> {
   await mkdir(dirname(path), { recursive: true })
   const stream = createWriteStream(path, { flags: append ? 'a' : 'w' })
+  const done = new Promise<void>((resolve, reject) => {
+    stream.once('finish', resolve)
+    stream.once('error', reject)
+  })
   let downloaded = initial
   let nextEmit = initial + PROGRESS_EMIT_INTERVAL
+  const reader = body.getReader()
   try {
-    for await (const chunk of body as AsyncIterable<Uint8Array>) {
-      if (!stream.write(chunk)) await once(stream, 'drain')
-      downloaded += chunk.byteLength
+    while (true) {
+      const { done: streamDone, value } = await reader.read()
+      if (streamDone) break
+      if (!value) continue
+      if (!stream.write(value)) await once(stream, 'drain')
+      downloaded += value.byteLength
       if (progress && (downloaded >= nextEmit || (total > 0 && downloaded === total))) {
         progress(downloaded)
         nextEmit = downloaded + PROGRESS_EMIT_INTERVAL
@@ -384,7 +392,7 @@ async function writeStreamToFile(
     }
   } finally {
     stream.end()
-    await once(stream, 'close')
+    await done
   }
   return downloaded
 }
