@@ -1,0 +1,118 @@
+# =========================
+# Build / binary outputs
+# =========================
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# =========================
+# Go
+# =========================
+vendor/
+# Go coverage profiles
+*.cover
+# Go workspace files (uncomment if you use workspaces)
+# go.work
+# go.work.sum
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+dist/
+*.tsbuildinfo
+.next/
+.nuxt/
+.cache/
+
+# =========================
+# Python (tooling/scripts)
+# =========================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# =========================
+# IDE and Editors
+# =========================
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+
+# =========================
+# OS generated files
+# =========================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Linux
+*~
+
+# =========================
+# Logs and temp files
+# =========================
+*.log
+*.tmp
+*.temp
+logs/
+tmp/
+
+# =========================
+# Secrets / local config
+# =========================
+.env
+.env.*
+!.env.example
+config.local.*
+*.pem
+*.crt
+*.key
+certs/
+*_cookies.txt
+
+# =========================
+# Downloads / media artifacts
+# =========================
+downloads/
+*.mp4
+*.mkv
+*.flv
+
+# =========================
+# AI / assistant tool folders
+# =========================
+.agent/
+.aider*
+.claude/
+.cursor/
+.codex/
+.kiro/
+.ace-tool/
+
+# =========================
+# Project reference repos (external clones with their own .git)
+# =========================
+pro-ref/
