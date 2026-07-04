@@ -70,7 +70,10 @@ export interface MediaStream {
   width?: number
   height?: number
   url?: string
+  audioUrl?: string
   backupUrls?: string[]
+  videoBackupUrls?: string[]
+  audioBackupUrls?: string[]
   headers?: Record<string, string>
 }
 
