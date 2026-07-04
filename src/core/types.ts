@@ -69,6 +69,9 @@ export interface MediaStream {
   size?: number
   width?: number
   height?: number
+  url?: string
+  backupUrls?: string[]
+  headers?: Record<string, string>
 }
 
 export interface MediaImage {
@@ -77,6 +80,7 @@ export interface MediaImage {
   width?: number
   height?: number
   livePhoto?: boolean
+  headers?: Record<string, string>
 }
 
 export interface MediaPart {
