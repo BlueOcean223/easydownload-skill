@@ -77,9 +77,12 @@ export interface MediaStream {
 export interface MediaImage {
   index: number
   url?: string
+  backupUrls?: string[]
   width?: number
   height?: number
   livePhoto?: boolean
+  livePhotoUrl?: string
+  videoUrl?: string
   headers?: Record<string, string>
 }
 
