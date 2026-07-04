@@ -33,6 +33,7 @@ function downloadOptions(cmd: Command): Command {
     .option('--concurrency <n>', 'item concurrency', parsePositiveInt)
     .option('--chunk-concurrency <n>', 'multipart chunk concurrency', parsePositiveInt)
     .option('--output-dir <dir>', 'output directory')
+    .option('--ffmpeg <path>', 'ffmpeg executable path')
     .option('--overwrite', 'overwrite existing files')
     .option('--no-overwrite', 'skip existing files')
     .option('--json-progress', 'print NDJSON progress to stdout')
@@ -145,7 +146,8 @@ program.addCommand(
       try {
         if (opts.plan) {
           const planJson = JSON.parse(await readFile(opts.plan, 'utf8'))
-          const plan = DownloadPlanSchema.parse(planJson)
+          const parsedPlan = DownloadPlanSchema.parse(planJson)
+          const plan = opts.ffmpeg ? { ...parsedPlan, ffmpeg: opts.ffmpeg } : parsedPlan
           const events = await runDownloadPlan(plan, { jsonProgress: Boolean(opts.jsonProgress) })
           const summary = summarizeDownloadEvents(events)
           if (opts.json || !opts.jsonProgress) printJson(summary)
@@ -170,7 +172,9 @@ program.addCommand(
           cookiesPath: opts.cookies,
           proxy: opts.proxy,
         }
-        const plan = await platform.createDownloadPlan(info, downloadOptions)
+        const ffmpeg = opts.ffmpeg ?? config.ffmpeg
+        const createdPlan = await platform.createDownloadPlan(info, downloadOptions)
+        const plan = ffmpeg ? { ...createdPlan, ffmpeg } : createdPlan
         const events = await runDownloadPlan(plan, { jsonProgress: Boolean(opts.jsonProgress) })
         const summary = summarizeDownloadEvents(events)
         if (opts.json || !opts.jsonProgress) printJson(summary)

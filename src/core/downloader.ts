@@ -1,12 +1,15 @@
 import { createWriteStream } from 'node:fs'
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, extname, join, basename } from 'node:path'
+import { spawn } from 'node:child_process'
+import { basename, dirname, extname, join } from 'node:path'
 import { once } from 'node:events'
 import {
   DownloadPlanSchema,
   type DownloadPlan,
   type DownloadItem,
+  type DashItem,
   type FileItem,
+  type ZipItem,
   type DownloadEvent,
 } from './types.js'
 
@@ -81,9 +84,11 @@ class DownloadExecutor {
           await this.processFile(item)
           return
         case 'zip':
-          throw new Error('zip item is not implemented yet')
+          await this.processZip(item)
+          return
         case 'dash':
-          throw new Error('dash item is not implemented yet')
+          await this.processDash(item)
+          return
       }
     } catch (err) {
       this.addFailure(item.id, err)
@@ -97,6 +102,61 @@ class DownloadExecutor {
       return
     }
     await this.downloadWithFallback(item.id, item.url, item.backupUrls, item.headers, target.path)
+    this.addArtifact({ taskId: item.id, path: target.path })
+  }
+
+  private async processZip(item: ZipItem): Promise<void> {
+    const target = await this.prepareTarget(item)
+    if (target.kind === 'skipped') {
+      this.addSkipped(target.skipped)
+      return
+    }
+
+    const tempDir = `${target.path}.parts`
+    await mkdir(tempDir, { recursive: true })
+    const successes: Array<{ name: string; path: string }> = []
+    const usedNames = new Set<string>()
+
+    await mapLimit(item.entries, Math.min(this.plan.concurrency, item.entries.length), async (entry, index) => {
+      const name = uniqueZipEntryName(sanitizeZipEntryName(entry.name, index), usedNames)
+      const entryPath = join(tempDir, `entry_${String(index).padStart(5, '0')}_${sanitizeFilename(basename(name)) || 'file'}`)
+      try {
+        await this.downloadWithFallback(`${item.id}:${name}`, entry.url, entry.backupUrls, { ...item.headers, ...entry.headers }, entryPath)
+        successes.push({ name, path: entryPath })
+      } catch (err) {
+        this.addFailure(`${item.id}:${name}`, err)
+      }
+    })
+
+    if (successes.length === 0) {
+      await rm(tempDir, { force: true, recursive: true })
+      this.addFailure(item.id, new Error('all zip entries failed'))
+      return
+    }
+
+    successes.sort((a, b) => a.name.localeCompare(b.name))
+    await writeZipArchive(target.path, successes)
+    await rm(tempDir, { force: true, recursive: true })
+    this.addArtifact({ taskId: item.id, path: target.path, ...(successes.length < item.entries.length ? { partial: true } : {}) })
+  }
+
+  private async processDash(item: DashItem): Promise<void> {
+    const target = await this.prepareTarget(item)
+    if (target.kind === 'skipped') {
+      this.addSkipped(target.skipped)
+      return
+    }
+
+    const tempDir = `${target.path}.parts`
+    await mkdir(tempDir, { recursive: true })
+    const videoPath = join(tempDir, `video${extensionFromUrl(item.videoUrl, '.video')}`)
+    const audioPath = join(tempDir, `audio${extensionFromUrl(item.audioUrl, '.audio')}`)
+
+    await this.downloadWithFallback(`${item.id}:video`, item.videoUrl, item.videoBackupUrls, item.headers, videoPath)
+    await this.downloadWithFallback(`${item.id}:audio`, item.audioUrl, item.audioBackupUrls, item.headers, audioPath)
+    await runFfmpegMux(this.plan.ffmpeg, videoPath, audioPath, `${target.path}.part`)
+    await finalizePart(target.path)
+    await rm(tempDir, { force: true, recursive: true })
     this.addArtifact({ taskId: item.id, path: target.path })
   }
 
@@ -131,9 +191,7 @@ class DownloadExecutor {
     const basePath = join(this.plan.outputDir, filename)
 
     if (this.plan.overwrite) {
-      await rm(basePath, { force: true })
-      await rm(`${basePath}.part`, { force: true })
-      await rm(`${basePath}.parts`, { force: true, recursive: true })
+      await removeDownloadState(basePath)
       return { kind: 'target', path: basePath }
     }
 
@@ -142,13 +200,14 @@ class DownloadExecutor {
       return { kind: 'target', path: basePath }
     }
 
-    if (!(await pathCollision(basePath))) return { kind: 'target', path: basePath }
+    // Default mode auto-renames completed files, but keeps .part/.parts state so reruns resume.
+    if (!(await fileExists(basePath))) return { kind: 'target', path: basePath }
 
     const ext = extname(filename)
     const stem = filename.slice(0, filename.length - ext.length)
     for (let i = 1; i < 10000; i++) {
       const candidate = join(this.plan.outputDir, `${stem} (${i})${ext}`)
-      if (!(await pathCollision(candidate))) return { kind: 'target', path: candidate }
+      if (!(await fileExists(candidate))) return { kind: 'target', path: candidate }
     }
     throw new Error(`could not allocate unique filename for ${filename}`)
   }
@@ -168,6 +227,7 @@ class DownloadExecutor {
           return
         } catch (err) {
           lastErr = err
+          if (!isRetryableError(err)) break
           if (attempt < DEFAULT_RETRIES) await sleep(attempt * 1000)
         }
       }
@@ -177,7 +237,9 @@ class DownloadExecutor {
 
   private async downloadOne(taskId: string, url: string, headers: Record<string, string>, dest: string): Promise<void> {
     const probe = await this.probeRange(url, headers).catch((err) => {
-      process.stderr.write(`range probe failed for ${shortUrl(url)}: ${err instanceof Error ? err.message : String(err)}; using sequential download\n`)
+      if (!isHttpStatusError(err, 404)) {
+        process.stderr.write(`range probe failed for ${shortUrl(url)}: ${err instanceof Error ? err.message : String(err)}; using sequential download\n`)
+      }
       return { supportsRange: false, total: 0 }
     })
 
@@ -195,8 +257,8 @@ class DownloadExecutor {
   }
 
   private async probeRange(url: string, headers: Record<string, string>): Promise<RangeProbe> {
-    const response = await fetch(url, { headers: { ...headers, Range: 'bytes=0-1' } })
-    await response.arrayBuffer().catch(() => undefined)
+    const response = await this.fetch(url, { headers: { ...headers, Range: 'bytes=0-1' } })
+    await response.body?.cancel().catch(() => undefined)
     if (response.status === 206) {
       const parsed = parseContentRange(response.headers.get('content-range'))
       if (parsed && parsed.start === 0 && parsed.total > 0) return { supportsRange: true, total: parsed.total }
@@ -215,7 +277,7 @@ class DownloadExecutor {
     for (let restart = 0; restart < 2; restart++) {
       const requestHeaders: Record<string, string> = { ...headers }
       if (resume > 0) requestHeaders.Range = `bytes=${resume}-`
-      const response = await fetch(url, { headers: requestHeaders })
+      const response = await this.fetch(url, { headers: requestHeaders })
       if (resume > 0 && response.status === 200) {
         await response.body?.cancel().catch(() => undefined)
         await rm(partPath, { force: true })
@@ -265,7 +327,7 @@ class DownloadExecutor {
   }
 
   private async downloadChunk(url: string, headers: Record<string, string>, partsDir: string, chunk: Chunk, total: number): Promise<void> {
-    const response = await fetch(url, { headers: { ...headers, Range: `bytes=${chunk.start}-${chunk.end}` } })
+    const response = await this.fetch(url, { headers: { ...headers, Range: `bytes=${chunk.start}-${chunk.end}` } })
     if (response.status !== 206) throw new Error(`chunk ${chunk.index} expected 206, got HTTP ${response.status}`)
     const range = parseContentRange(response.headers.get('content-range'))
     if (!range || range.start !== chunk.start || range.end !== chunk.end || range.total !== total) {
@@ -282,14 +344,18 @@ class DownloadExecutor {
     }
     await rename(tmp, path)
   }
+
+  private fetch(url: string, init: RequestInit): Promise<Response> {
+    return fetchWithTimeout(url, init, this.plan.timeoutMs)
+  }
 }
 
-async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  const queue = [...items]
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
+  const queue = items.map((item, index) => ({ item, index }))
   const workers = Array.from({ length: Math.min(Math.max(limit, 1), items.length) }, async () => {
     while (queue.length > 0) {
-      const item = queue.shift()
-      if (item !== undefined) await fn(item)
+      const next = queue.shift()
+      if (next) await fn(next.item, next.index)
     }
   })
   await Promise.all(workers)
@@ -386,23 +452,175 @@ async function finalizePart(dest: string): Promise<void> {
   await rename(partPath, dest)
 }
 
-async function pathCollision(path: string): Promise<boolean> {
-  return (await fileExists(path)) || (await fileExists(`${path}.part`)) || (await dirExists(`${path}.parts`))
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw new Error(`request timed out after ${timeoutMs}ms`)
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function runFfmpegMux(ffmpeg: string, videoPath: string, audioPath: string, outputPath: string): Promise<void> {
+  await rm(outputPath, { force: true })
+  await mkdir(dirname(outputPath), { recursive: true })
+  const args = ['-hide_banner', '-y', '-i', videoPath, '-i', audioPath, '-c', 'copy', outputPath]
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk.toString()
+      if (stderr.length > 8000) stderr = stderr.slice(-8000)
+    })
+    child.once('error', (err) => reject(new Error(`failed to start ffmpeg (${ffmpeg}): ${err.message}`)))
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve()
+      else reject(new Error(`ffmpeg failed${signal ? ` with signal ${signal}` : ` with exit code ${code}`}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))
+    })
+  })
+  if (!(await fileExists(outputPath))) throw new Error('ffmpeg did not produce output file')
+}
+
+async function writeZipArchive(dest: string, entries: Array<{ name: string; path: string }>): Promise<void> {
+  await mkdir(dirname(dest), { recursive: true })
+  const partPath = `${dest}.part`
+  const tmpPath = `${partPath}.ziptmp`
+  await rm(tmpPath, { force: true })
+
+  const central: Buffer[] = []
+  let offset = 0
+  const out = await open(tmpPath, 'w')
+  try {
+    for (const entry of entries) {
+      const data = await readFile(entry.path)
+      const name = Buffer.from(entry.name, 'utf8')
+      const crc = crc32(data)
+      const sizes = checkedZipSize(data.byteLength, entry.name)
+      const localOffset = offset
+      const local = zipLocalHeader(name, crc, sizes)
+      await writeBuffer(out, local)
+      await writeBuffer(out, data)
+      offset += local.byteLength + data.byteLength
+      central.push(zipCentralHeader(name, crc, sizes, localOffset))
+    }
+
+    const centralOffset = offset
+    for (const header of central) {
+      await writeBuffer(out, header)
+      offset += header.byteLength
+    }
+    const centralSize = offset - centralOffset
+    await writeBuffer(out, zipEndOfCentralDirectory(central.length, centralSize, centralOffset))
+  } finally {
+    await out.close()
+  }
+
+  await rename(tmpPath, partPath)
+  await finalizePart(dest)
+}
+
+function zipLocalHeader(name: Buffer, crc: number, size: number): Buffer {
+  const header = Buffer.alloc(30)
+  const { time, date } = zipDosDateTime(new Date())
+  header.writeUInt32LE(0x04034b50, 0)
+  header.writeUInt16LE(20, 4)
+  header.writeUInt16LE(0x0800, 6)
+  header.writeUInt16LE(0, 8)
+  header.writeUInt16LE(time, 10)
+  header.writeUInt16LE(date, 12)
+  header.writeUInt32LE(crc, 14)
+  header.writeUInt32LE(size, 18)
+  header.writeUInt32LE(size, 22)
+  header.writeUInt16LE(name.byteLength, 26)
+  header.writeUInt16LE(0, 28)
+  return Buffer.concat([header, name])
+}
+
+function zipCentralHeader(name: Buffer, crc: number, size: number, localOffset: number): Buffer {
+  if (localOffset > 0xffffffff) throw new Error('zip64 is not supported yet')
+  const header = Buffer.alloc(46)
+  const { time, date } = zipDosDateTime(new Date())
+  header.writeUInt32LE(0x02014b50, 0)
+  header.writeUInt16LE(20, 4)
+  header.writeUInt16LE(20, 6)
+  header.writeUInt16LE(0x0800, 8)
+  header.writeUInt16LE(0, 10)
+  header.writeUInt16LE(time, 12)
+  header.writeUInt16LE(date, 14)
+  header.writeUInt32LE(crc, 16)
+  header.writeUInt32LE(size, 20)
+  header.writeUInt32LE(size, 24)
+  header.writeUInt16LE(name.byteLength, 28)
+  header.writeUInt16LE(0, 30)
+  header.writeUInt16LE(0, 32)
+  header.writeUInt16LE(0, 34)
+  header.writeUInt16LE(0, 36)
+  header.writeUInt32LE(0, 38)
+  header.writeUInt32LE(localOffset, 42)
+  return Buffer.concat([header, name])
+}
+
+function zipEndOfCentralDirectory(count: number, centralSize: number, centralOffset: number): Buffer {
+  if (count > 0xffff || centralSize > 0xffffffff || centralOffset > 0xffffffff) throw new Error('zip64 is not supported yet')
+  const header = Buffer.alloc(22)
+  header.writeUInt32LE(0x06054b50, 0)
+  header.writeUInt16LE(0, 4)
+  header.writeUInt16LE(0, 6)
+  header.writeUInt16LE(count, 8)
+  header.writeUInt16LE(count, 10)
+  header.writeUInt32LE(centralSize, 12)
+  header.writeUInt32LE(centralOffset, 16)
+  header.writeUInt16LE(0, 20)
+  return header
+}
+
+function checkedZipSize(size: number, name: string): number {
+  if (size > 0xffffffff) throw new Error(`zip entry is too large for zip32: ${name}`)
+  return size
+}
+
+async function writeBuffer(out: Awaited<ReturnType<typeof open>>, buffer: Buffer | Uint8Array): Promise<void> {
+  await out.write(buffer, 0, buffer.byteLength)
+}
+
+function zipDosDateTime(date: Date): { time: number; date: number } {
+  const year = Math.max(1980, date.getFullYear())
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  }
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let i = 0; i < table.length; i++) {
+    let c = i
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    table[i] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(data: Uint8Array): number {
+  let c = 0xffffffff
+  for (const byte of data) c = CRC32_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+async function removeDownloadState(path: string): Promise<void> {
+  await rm(path, { force: true })
+  await rm(`${path}.part`, { force: true })
+  await rm(`${path}.parts`, { force: true, recursive: true })
 }
 
 async function fileExists(path: string): Promise<boolean> {
   try {
     const st = await stat(path)
     return st.isFile()
-  } catch {
-    return false
-  }
-}
-
-async function dirExists(path: string): Promise<boolean> {
-  try {
-    const st = await stat(path)
-    return st.isDirectory()
   } catch {
     return false
   }
@@ -421,6 +639,45 @@ function sanitizeFilename(name: string): string {
   return basename(name.trim().replaceAll('\\', '/')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+$/, '').trim().slice(0, 180)
 }
 
+function sanitizeZipEntryName(name: string, index: number): string {
+  const parts = name
+    .trim()
+    .replaceAll('\\', '/')
+    .split('/')
+    .map((part) => sanitizeFilename(part))
+    .filter(Boolean)
+  return parts.join('/') || `entry-${index + 1}`
+}
+
+function uniqueZipEntryName(name: string, used: Set<string>): string {
+  if (!used.has(name)) {
+    used.add(name)
+    return name
+  }
+
+  const parts = name.split('/')
+  const last = parts.pop() || 'entry'
+  const ext = extname(last)
+  const stem = last.slice(0, last.length - ext.length) || 'entry'
+  for (let i = 1; i < 10000; i++) {
+    const candidate = [...parts, `${stem} (${i})${ext}`].join('/')
+    if (!used.has(candidate)) {
+      used.add(candidate)
+      return candidate
+    }
+  }
+  throw new Error(`could not allocate unique zip entry name for ${name}`)
+}
+
+function extensionFromUrl(url: string, fallback: string): string {
+  try {
+    const ext = extname(new URL(url).pathname)
+    return ext && ext.length <= 12 ? ext : fallback
+  } catch {
+    return fallback
+  }
+}
+
 function uniqueUrls(urls: string[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
@@ -435,6 +692,22 @@ function uniqueUrls(urls: string[]): string[] {
 
 function shortUrl(url: string): string {
   return url.length <= 80 ? url : `${url.slice(0, 77)}...`
+}
+
+function isRetryableError(err: unknown): boolean {
+  const status = httpStatusFromError(err)
+  if (status !== undefined) return status === 408 || status === 429 || status >= 500
+  return true
+}
+
+function isHttpStatusError(err: unknown, status: number): boolean {
+  return httpStatusFromError(err) === status
+}
+
+function httpStatusFromError(err: unknown): number | undefined {
+  const message = err instanceof Error ? err.message : String(err)
+  const match = message.match(/\bHTTP\s+(\d{3})\b/)
+  return match ? Number.parseInt(match[1], 10) : undefined
 }
 
 function sleep(ms: number): Promise<void> {
