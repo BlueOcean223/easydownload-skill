@@ -476,7 +476,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 async function runFfmpegMux(ffmpeg: string, videoPath: string, audioPath: string, outputPath: string): Promise<void> {
   await rm(outputPath, { force: true })
   await mkdir(dirname(outputPath), { recursive: true })
-  const args = ['-hide_banner', '-y', '-i', videoPath, '-i', audioPath, '-c', 'copy', outputPath]
+  const args = ['-hide_banner', '-y', '-i', videoPath, '-i', audioPath, '-c', 'copy', '-f', 'mp4', outputPath]
   await new Promise<void>((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
