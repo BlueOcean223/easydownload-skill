@@ -56,6 +56,88 @@ test('resolves bangumi episode and creates DASH plan', async () => {
   expect(plan.items[0]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/333-80.m4s', audioUrl: 'https://audio.example.com/333.m4s' })
 })
 
+test('adds subtitle file items to video plans when player v2 exposes subtitles', async () => {
+  mockFetch(async (url) => {
+    if (url.includes('/x/web-interface/view')) return jsonResponse({ code: 0, data: viewData() })
+    if (url.includes('/x/player/playurl')) return jsonResponse({ code: 0, data: playData(111) })
+    if (url.includes('/x/player/v2')) {
+      return jsonResponse({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', lan_doc: '中文', subtitle_url: '//subtitle.example.com/zh.json' }] } } })
+    }
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  const info = await bilibiliPlatform.resolve(`https://www.bilibili.com/video/${bvid}`, { configDir: '/tmp/easydl-test' })
+  const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out', quality: '80' })
+
+  expect(plan.items).toHaveLength(2)
+  expect(plan.items[1]).toMatchObject({ kind: 'file', url: 'https://subtitle.example.com/zh.json' })
+})
+
+test('resolves collection URLs into all-part DASH plans', async () => {
+  mockFetch(async (url) => {
+    if (url.includes('/x/polymer/web-space/seasons_archives_list')) {
+      return jsonResponse({ code: 0, data: { meta: { name: '收藏夹' }, archives: [{ bvid: 'BVcol1' }, { bvid: 'BVcol2' }] } })
+    }
+    if (url.includes('/x/web-interface/view')) {
+      const parsed = new URL(url)
+      const bv = parsed.searchParams.get('bvid') || bvid
+      const cid = bv === 'BVcol1' ? 111 : 222
+      return jsonResponse({ code: 0, data: { ...viewData(bv, cid, `${bv} 标题`), cid, pages: [{ cid, page: 1, part: `${bv} 标题`, duration: 60 }] } })
+    }
+    if (url.includes('/x/player/playurl')) {
+      const parsed = new URL(url)
+      return jsonResponse({ code: 0, data: playData(Number(parsed.searchParams.get('cid'))) })
+    }
+    if (url.includes('/x/player/v2')) return jsonResponse({ code: 0, data: { subtitle: { subtitles: [] } } })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  const info = await bilibiliPlatform.resolve('https://space.bilibili.com/123/channel/collectiondetail?sid=456', { configDir: '/tmp/easydl-test' })
+  expect(info.title).toBe('收藏夹')
+  expect(info.parts?.map((part) => part.title)).toEqual(['[01] BVcol1 标题', '[02] BVcol2 标题'])
+
+  const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out', allParts: true, quality: '80' })
+  expect(plan.items).toHaveLength(2)
+  expect(plan.items[0]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/111-80.m4s' })
+  expect(plan.items[1]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/222-80.m4s' })
+})
+
+test('resolves cheese course episodes', async () => {
+  mockFetch(async (url) => {
+    if (url.includes('/pugv/view/web/season/v2')) {
+      return jsonResponse({ code: 0, data: { title: '课程标题', episodes: [{ id: 777, title: '第一课', duration: 100 }] } })
+    }
+    if (url.includes('/pugv/player/web/playurl')) return jsonResponse({ code: 0, data: playData(777) })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  const info = await bilibiliPlatform.resolve('https://www.bilibili.com/cheese/play/ss123', { configDir: '/tmp/easydl-test' })
+  expect(info.title).toBe('课程标题')
+  const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out', quality: '80' })
+  expect(plan.items[0]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/777-80.m4s' })
+})
+
+test('resolves gongfang order files into a zip plan', async () => {
+  mockFetch(async (url, init) => {
+    if (url.includes('/mall-c/order/detail')) return new Response('{"itemsName":"课程资料"}', { status: 200 })
+    if (url.includes('/mall-c/ship/orderdetails/querydownloadurl')) {
+      expect(init?.method).toBe('POST')
+      return jsonResponse({ code: 0, data: { url: 'https://download.example.com/file.pdf' } })
+    }
+    if (url.includes('/mall-c/ship/orderdetails/query')) {
+      expect(init?.method).toBe('POST')
+      return jsonResponse({ code: 0, data: { shipOrderDetails: [{ fileContentType: '.pdf', fileName: '讲义.pdf', shipOrderDetailsId: 42 }] } })
+    }
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  const info = await bilibiliPlatform.resolve('https://gf.bilibili.com/order/hyg-download/12345', { configDir: '/tmp/easydl-test' })
+  const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out' })
+  expect(plan.items[0]?.kind).toBe('zip')
+  if (plan.items[0]?.kind !== 'zip') throw new Error('expected zip item')
+  expect(plan.items[0].entries[0]).toMatchObject({ name: '01_讲义.pdf', url: 'https://download.example.com/file.pdf' })
+})
+
 test('creates and polls bilibili QR login sessions', async () => {
   const configDir = await tempDir()
   mockFetch(async (url) => {
@@ -81,18 +163,18 @@ test('creates and polls bilibili QR login sessions', async () => {
   expect((await loadAuth(configDir)).bilibili?.sessData).toBe('sess/data')
 })
 
-function viewData() {
+function viewData(id = bvid, firstCid = 111, title = '普通视频') {
   return {
-    bvid,
+    bvid: id,
     aid: 170001,
-    title: '普通视频',
+    title,
     pic: 'https://i.example.com/cover.jpg',
     duration: 120,
     owner: { name: 'UP主' },
-    cid: 111,
+    cid: firstCid,
     pages: [
-      { cid: 111, page: 1, part: '第一P', duration: 60 },
-      { cid: 222, page: 2, part: '第二P', duration: 60 },
+      { cid: firstCid, page: 1, part: '第一P', duration: 60 },
+      { cid: firstCid === 111 ? 222 : firstCid + 1, page: 2, part: '第二P', duration: 60 },
     ],
   }
 }
