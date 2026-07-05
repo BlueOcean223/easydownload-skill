@@ -15,6 +15,17 @@ program
   .name('easydl')
   .description('Agent-friendly downloader CLI for Xiaohongshu, Douyin, Kuaishou, and Bilibili')
   .version('0.1.0')
+  .showHelpAfterError()
+  .addHelpText('after', `
+Examples:
+  easydl download '<url or share text>'
+  easydl download --json-progress '<url or share text>'
+  easydl formats --json '<url>'
+  easydl auth bilibili login
+  easydl auth bilibili status --json
+  easydl auth bilibili logout
+  easydl config set ffmpeg /opt/homebrew/bin/ffmpeg
+`)
 
 function commonOptions(cmd: Command): Command {
   return cmd
@@ -121,6 +132,11 @@ program.addCommand(
   commonOptions(new Command('info'))
     .description('resolve metadata for a link/share text')
     .argument('<input>', 'link or share text')
+    .addHelpText('after', `
+Examples:
+  easydl info '<url or share text>'
+  easydl info --json '<url>'
+`)
     .action(async (input: string, opts) => {
       try {
         await handleInfo(input, opts)
@@ -135,6 +151,11 @@ program.addCommand(
   commonOptions(new Command('formats'))
     .description('list available formats/parts/images for a link/share text')
     .argument('<input>', 'link or share text')
+    .addHelpText('after', `
+Examples:
+  easydl formats '<url>'
+  easydl formats --json '<url>'
+`)
     .action(async (input: string, opts) => {
       try {
         const platform = resolvePlatform(input, parsePlatform(opts.platform))
@@ -159,10 +180,27 @@ program.addCommand(
     }),
 )
 
+async function handleBilibiliLogout(json: boolean): Promise<void> {
+  const before = await loadAuth()
+  await clearBilibiliAuth()
+  const result = { platform: 'bilibili', loggedIn: false, cleared: Boolean(before.bilibili?.sessData || before.bilibili?.cookieHeader) }
+  if (json) return printJson(result)
+  process.stdout.write(result.cleared ? 'Bilibili auth cleared\n' : 'Bilibili was already logged out\n')
+}
+
 program.addCommand(
   downloadOptions(new Command('download'))
     .description('download a link/share text')
     .argument('[input]', 'link or share text')
+    .addHelpText('after', `
+Examples:
+  easydl download '<url or share text>'
+  easydl download --json '<url>'
+  easydl download --json-progress '<url>'
+  easydl download --quality 1080p --part 2 '<url>'
+  easydl download --all-parts '<multi-part url>'
+  easydl download --images 1,3-5 '<album url>'
+`)
     .action(async (input: string | undefined, opts) => {
       try {
         if (opts.json && opts.jsonProgress) throw new Error('--json and --json-progress cannot be used together')
@@ -216,9 +254,34 @@ program.addCommand(
     }),
 )
 
-const auth = new Command('auth').description('manage platform authentication')
-const bilibili = new Command('bilibili').description('Bilibili authentication')
-const login = new Command('login').description('Bilibili QR login')
+const auth = new Command('auth')
+  .description('manage platform authentication')
+  .addHelpText('after', `
+Examples:
+  easydl auth bilibili login
+  easydl auth bilibili login create --json
+  easydl auth bilibili login poll <sessionId> --json
+  easydl auth bilibili status --json
+  easydl auth bilibili logout
+  easydl auth logout bilibili --json
+`)
+const bilibili = new Command('bilibili')
+  .description('Bilibili authentication')
+  .addHelpText('after', `
+Examples:
+  easydl auth bilibili login
+  easydl auth bilibili status --json
+  easydl auth bilibili logout --json
+`)
+const login = new Command('login')
+  .description('Bilibili QR login')
+  .addHelpText('after', `
+Examples:
+  easydl auth bilibili login
+  easydl auth bilibili login --json
+  easydl auth bilibili login create --json
+  easydl auth bilibili login poll <sessionId> --json
+`)
 const loginCreate = login.command('create').option('--json', 'print JSON').description('create a QR login session')
 loginCreate.action(async () => {
   try {
@@ -262,7 +325,7 @@ login.option('--json', 'print JSON').action(async () => {
   }
 })
 bilibili.addCommand(login)
-const bilibiliStatus = bilibili.command('status').option('--json', 'print JSON')
+const bilibiliStatus = bilibili.command('status').description('show stored Bilibili login state').option('--json', 'print JSON')
 bilibiliStatus.action(async () => {
   try {
     const auth = await loadAuth()
@@ -274,16 +337,26 @@ bilibiliStatus.action(async () => {
     process.exitCode = 1
   }
 })
-bilibili.command('logout').action(async () => {
+const bilibiliLogout = bilibili.command('logout').description('clear stored Bilibili login state').option('--json', 'print JSON')
+bilibiliLogout.action(async () => {
   try {
-    await clearBilibiliAuth()
-    process.stdout.write('Bilibili auth cleared\n')
+    await handleBilibiliLogout(optionEnabled(bilibiliLogout, 'json'))
   } catch (err) {
     printError(err)
     process.exitCode = 1
   }
 })
 auth.addCommand(bilibili)
+const authLogout = auth.command('logout').description('clear stored platform login state').argument('[platform]', 'platform to logout from (currently bilibili)', 'bilibili').option('--json', 'print JSON')
+authLogout.action(async (platform: string) => {
+  try {
+    if (platform !== 'bilibili') throw new Error(`unsupported auth platform: ${platform}`)
+    await handleBilibiliLogout(optionEnabled(authLogout, 'json'))
+  } catch (err) {
+    printError(err)
+    process.exitCode = 1
+  }
+})
 program.addCommand(auth)
 
 const configCmd = new Command('config').description('manage easydl config')

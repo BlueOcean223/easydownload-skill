@@ -34,9 +34,36 @@ test('download defaults to human summary and rejects mixed JSON modes', async ()
   }
 })
 
-function runCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+test('help documents auth logout and logout clears stored bilibili auth', async () => {
+  const help = await runCli(['--help'])
+  expect(help.code).toBe(0)
+  expect(help.stdout).toContain('Examples:')
+  expect(help.stdout).toContain('easydl auth bilibili logout')
+
+  const authHelp = await runCli(['auth', 'bilibili', '--help'])
+  expect(authHelp.code).toBe(0)
+  expect(authHelp.stdout).toContain('logout')
+  expect(authHelp.stdout).toContain('clear stored Bilibili login state')
+
+  const tmp = await mkdtemp(join(tmpdir(), 'easydl-auth-test-'))
+  try {
+    await writeFile(join(tmp, 'auth.json'), JSON.stringify({ bilibili: { sessData: 'sess', cookieHeader: 'SESSDATA=sess', updatedAt: '2026-01-01T00:00:00.000Z' } }))
+    const logout = await runCli(['auth', 'bilibili', 'logout', '--json'], { EASYDL_CONFIG_DIR: tmp })
+    expect(logout.code).toBe(0)
+    expect(JSON.parse(logout.stdout)).toEqual({ platform: 'bilibili', loggedIn: false, cleared: true })
+    expect(JSON.parse(await readFile(join(tmp, 'auth.json'), 'utf8'))).toEqual({})
+
+    const authLogoutAlias = await runCli(['auth', 'logout', 'bilibili', '--json'], { EASYDL_CONFIG_DIR: tmp })
+    expect(authLogoutAlias.code).toBe(0)
+    expect(JSON.parse(authLogoutAlias.stdout)).toEqual({ platform: 'bilibili', loggedIn: false, cleared: false })
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
+})
+
+function runCli(args: string[], env?: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['run', 'src/cli.ts', ...args], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['run', 'src/cli.ts', ...args], { cwd: process.cwd(), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk.toString() })
