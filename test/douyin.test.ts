@@ -82,6 +82,21 @@ test('uses ratio probing when share video lacks bit_rate URLs', async () => {
   expect(info.streams?.[0]).toMatchObject({ id: '720p', size: 12345 })
 })
 
+test('keeps 1080p probing for videos whose source resolution is 1080p', async () => {
+  mockFetch(async (url, init) => {
+    if (url === `https://www.iesdouyin.com/share/video/${awemeId}/?app=aweme`) return htmlResponse(routerDataHtml(videoItemWithoutBitrate1080()))
+    if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) {
+      const ratio = new URL(url).searchParams.get('ratio')
+      if (ratio === '1080p') return new Response('xx', { status: 206, headers: { 'content-range': 'bytes 0-1/333', 'content-type': 'video/mp4' } })
+      return new Response('', { status: 404 })
+    }
+    throw new Error(`unexpected fetch ${url} ${JSON.stringify(init?.headers)}`)
+  })
+
+  const info = await douyinPlatform.resolve(`https://www.douyin.com/video/${awemeId}`, { configDir: '/tmp/easydl-test' })
+  expect(info.streams?.[0]).toMatchObject({ id: '1080p', size: 333 })
+})
+
 test('retries share page with ttwid when router data is hidden', async () => {
   mockFetch(async (url, init) => {
     const headers = init?.headers as Record<string, string> | undefined
@@ -145,6 +160,18 @@ function videoItemWithoutBitrate() {
     author: { nickname: '作者' },
     video: {
       play_addr: { uri: 'video-uri', width: 720, height: 1280, url_list: [] },
+      bit_rate: [],
+    },
+  }
+}
+
+function videoItemWithoutBitrate1080() {
+  return {
+    ...videoItemWithoutBitrate(),
+    video: {
+      play_addr: { uri: 'video-uri', width: 1080, height: 1920, url_list: [] },
+      width: 1080,
+      height: 1920,
       bit_rate: [],
     },
   }
