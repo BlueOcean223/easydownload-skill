@@ -56,6 +56,19 @@ function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
 }
 
+function optionValue<T = unknown>(opts: unknown, key: string): T | undefined {
+  if (!opts || typeof opts !== 'object') return undefined
+  const record = opts as Record<string, unknown> & { opts?: () => Record<string, unknown>; getOptionValue?: (name: string) => unknown }
+  if (key in record) return record[key] as T
+  if (typeof record.getOptionValue === 'function') return record.getOptionValue(key) as T | undefined
+  if (typeof record.opts === 'function') return record.opts()[key] as T | undefined
+  return undefined
+}
+
+function optionEnabled(opts: unknown, key: string): boolean {
+  return Boolean(optionValue(opts, key))
+}
+
 function printError(err: unknown): void {
   const msg = err instanceof Error ? err.message : String(err)
   process.stderr.write(`Error: ${msg}\n`)
@@ -200,46 +213,42 @@ program.addCommand(
 const auth = new Command('auth').description('manage platform authentication')
 const bilibili = new Command('bilibili').description('Bilibili authentication')
 const login = new Command('login').description('Bilibili QR login')
-login
-  .command('create')
-  .option('--json', 'print JSON')
-  .description('create a QR login session')
-  .action(async (opts) => {
-    try {
-      const session = await createBilibiliQRSession({ terminal: !opts.json })
-      if (opts.json) return printJson(session)
-      if (session.terminal) process.stdout.write(`${session.terminal}\n`)
-      process.stdout.write(`URL: ${session.url}\nQR image: ${session.qrPath}\nSession: ${session.sessionId}\n`)
-    } catch (err) {
-      printError(err)
-      process.exitCode = 1
-    }
-  })
-login
-  .command('poll')
-  .argument('<sessionId>')
-  .option('--json', 'print JSON')
-  .description('poll a QR login session')
-  .action(async (sessionId: string, opts) => {
-    try {
-      const result = await pollBilibiliQRSession(sessionId)
-      if (opts.json) return printJson(result)
-      process.stdout.write(`${result.message}${result.loggedIn ? ' (logged in)' : ''}\n`)
-    } catch (err) {
-      printError(err)
-      process.exitCode = 1
-    }
-  })
-login.option('--json', 'print JSON').action(async (opts) => {
+const loginCreate = login.command('create').option('--json', 'print JSON').description('create a QR login session')
+loginCreate.action(async () => {
   try {
-    const session = await createBilibiliQRSession({ terminal: !opts.json })
-    if (opts.json) printJson(session)
+    const json = optionEnabled(loginCreate, 'json') || optionEnabled(login, 'json')
+    const session = await createBilibiliQRSession({ terminal: !json })
+    if (json) return printJson(session)
+    if (session.terminal) process.stdout.write(`${session.terminal}\n`)
+    process.stdout.write(`URL: ${session.url}\nQR image: ${session.qrPath}\nSession: ${session.sessionId}\n`)
+  } catch (err) {
+    printError(err)
+    process.exitCode = 1
+  }
+})
+const loginPoll = login.command('poll').argument('<sessionId>').option('--json', 'print JSON').description('poll a QR login session')
+loginPoll.action(async (sessionId: string) => {
+  try {
+    const json = optionEnabled(loginPoll, 'json') || optionEnabled(login, 'json')
+    const result = await pollBilibiliQRSession(sessionId)
+    if (json) return printJson(result)
+    process.stdout.write(`${result.message}${result.loggedIn ? ' (logged in)' : ''}\n`)
+  } catch (err) {
+    printError(err)
+    process.exitCode = 1
+  }
+})
+login.option('--json', 'print JSON').action(async () => {
+  try {
+    const json = optionEnabled(login, 'json')
+    const session = await createBilibiliQRSession({ terminal: !json })
+    if (json) printJson(session)
     else {
       if (session.terminal) process.stdout.write(`${session.terminal}\n`)
       process.stdout.write(`URL: ${session.url}\nQR image: ${session.qrPath}\nWaiting for confirmation...\n`)
     }
     const result = await waitForBilibiliQRLogin(session.sessionId)
-    if (opts.json) printJson(result)
+    if (json) printJson(result)
     else process.stdout.write('Bilibili login successful\n')
   } catch (err) {
     printError(err)
@@ -247,11 +256,12 @@ login.option('--json', 'print JSON').action(async (opts) => {
   }
 })
 bilibili.addCommand(login)
-bilibili.command('status').option('--json', 'print JSON').action(async (opts) => {
+const bilibiliStatus = bilibili.command('status').option('--json', 'print JSON')
+bilibiliStatus.action(async () => {
   try {
     const auth = await loadAuth()
     const result = { platform: 'bilibili', loggedIn: Boolean(auth.bilibili?.sessData), updatedAt: auth.bilibili?.updatedAt }
-    if (opts.json) return printJson(result)
+    if (optionEnabled(bilibiliStatus, 'json')) return printJson(result)
     process.stdout.write(result.loggedIn ? `Bilibili logged in (${result.updatedAt})\n` : 'Bilibili not logged in\n')
   } catch (err) {
     printError(err)
@@ -274,7 +284,7 @@ const configCmd = new Command('config').description('manage easydl config')
 configCmd.command('get').option('--json', 'print JSON').action(async (opts) => {
   try {
     const config = await loadConfig()
-    if (opts.json) return printJson(config)
+    if (optionEnabled(opts, 'json')) return printJson(config)
     for (const [key, value] of Object.entries(config)) process.stdout.write(`${key}=${value}\n`)
   } catch (err) {
     printError(err)
