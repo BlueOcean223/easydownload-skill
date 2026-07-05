@@ -269,7 +269,8 @@ async function resolveBangumi(parsed: Extract<ParsedBiliInput, { kind: 'bangumi'
     duration: ep.duration,
     badge: ep.badge,
   }))
-  await attachSubtitles(parts, ctx)
+  // Do not query x/player/v2 subtitles for PGC/bangumi episodes. That UGC
+  // endpoint can return unrelated AI subtitle URLs for PGC bvid/cid pairs.
   const current = parts[selectedIndex]
   const streams = await fetchPartStreams('bangumi', current, ctx)
   const streamsByPart: Record<number, BiliStream[]> = { [current.index]: streams }

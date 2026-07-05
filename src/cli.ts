@@ -169,7 +169,13 @@ program.addCommand(
         if (opts.plan) {
           const planJson = JSON.parse(await readFile(opts.plan, 'utf8'))
           const parsedPlan = DownloadPlanSchema.parse(planJson)
-          const plan = { ...parsedPlan, ...(opts.ffmpeg ? { ffmpeg: opts.ffmpeg } : {}), ...(opts.proxy ? { proxy: opts.proxy } : {}) }
+          const plan = {
+            ...parsedPlan,
+            ...(opts.ffmpeg ? { ffmpeg: opts.ffmpeg } : {}),
+            ...(opts.proxy ? { proxy: opts.proxy } : {}),
+            ...(opts.overwrite ? { overwrite: true, noOverwrite: false } : {}),
+            ...((Boolean(opts.noOverwrite) || opts.overwrite === false) ? { noOverwrite: true, overwrite: false } : {}),
+          }
           const events = await runDownloadPlan(plan, { jsonProgress: Boolean(opts.jsonProgress) })
           const summary = summarizeDownloadEvents(events)
           if (opts.json) printJson(summary)
@@ -191,7 +197,7 @@ program.addCommand(
           concurrency: opts.concurrency ?? config.concurrency,
           chunkConcurrency: opts.chunkConcurrency ?? config.chunkConcurrency,
           overwrite: Boolean(opts.overwrite),
-          noOverwrite: Boolean(opts.noOverwrite),
+          noOverwrite: Boolean(opts.noOverwrite) || opts.overwrite === false,
           cookiesPath: opts.cookies,
           proxy: opts.proxy,
         }

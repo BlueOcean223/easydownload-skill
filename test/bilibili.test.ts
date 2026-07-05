@@ -42,17 +42,24 @@ test('resolves b23 ordinary video and builds DASH plans for all parts', async ()
 })
 
 test('resolves bangumi episode and creates DASH plan', async () => {
+  let playerV2Calls = 0
   mockFetch(async (url) => {
     if (url.includes('/pgc/view/web/season')) return jsonResponse({ code: 0, result: seasonData() })
     if (url.includes('/pgc/player/web/playurl')) return jsonResponse({ code: 0, result: playData(333) })
+    if (url.includes('/x/player/v2')) {
+      playerV2Calls++
+      return jsonResponse({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', lan_doc: '中文', subtitle_url: '//wrong.example.com/sub.json' }] } } })
+    }
     throw new Error(`unexpected fetch ${url}`)
   })
 
   const info = await bilibiliPlatform.resolve('https://www.bilibili.com/bangumi/play/ep123', { configDir: '/tmp/easydl-test' })
   expect(info.type).toBe('bangumi')
   expect(info.parts?.map((part) => part.title)).toEqual(['1 第一集', '2 第二集'])
+  expect(playerV2Calls).toBe(0)
 
   const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out' })
+  expect(plan.items).toHaveLength(1)
   expect(plan.items[0]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/333-80.m4s', audioUrl: 'https://audio.example.com/333.m4s' })
 })
 

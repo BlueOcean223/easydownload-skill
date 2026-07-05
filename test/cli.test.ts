@@ -19,6 +19,12 @@ test('download defaults to human summary and rejects mixed JSON modes', async ()
     expect(human.stdout).toContain('artifact:')
     expect(await readFile(join(tmp, 'hello.txt'), 'utf8')).toBe('hello')
 
+    const skipped = await runCli(['download', '--plan', planPath, '--no-overwrite', '--json'])
+    expect(skipped.code).toBe(0)
+    const skippedSummary = JSON.parse(skipped.stdout)
+    expect(skippedSummary.artifacts).toEqual([])
+    expect(skippedSummary.skipped[0]).toMatchObject({ taskId: 'hello', reason: 'file exists' })
+
     const conflict = await runCli(['download', '--json', '--json-progress', '--plan', planPath])
     expect(conflict.code).toBe(1)
     expect(conflict.stdout).toBe('')
