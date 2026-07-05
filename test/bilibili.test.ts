@@ -160,9 +160,9 @@ test('creates and polls bilibili QR login sessions', async () => {
       return jsonResponse({ code: 0, data: { url: 'https://passport.bilibili.com/qrcode/test', qrcode_key: 'key123' } })
     }
     if (url.includes('/qrcode/poll')) {
-      return new Response(JSON.stringify({ code: 0, data: { code: 0, message: 'ok' } }), {
+      return new Response(JSON.stringify({ code: 0, data: { code: 0, message: 'ok', url: 'https://www.bilibili.com/?SESSDATA=sess%2Fdata&DedeUserID=42&bili_jct=csrf' } }), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'set-cookie': 'SESSDATA=sess%2Fdata; Path=/; Domain=.bilibili.com' },
+        headers: { 'content-type': 'application/json', 'set-cookie': 'sid=abc123; Path=/; Domain=.bilibili.com' },
       })
     }
     throw new Error(`unexpected fetch ${url}`)
@@ -175,7 +175,10 @@ test('creates and polls bilibili QR login sessions', async () => {
   const result = await pollBilibiliQRSession(session.sessionId, { configDir })
   expect(result.loggedIn).toBe(true)
   expect(result.sessData).toBe('sess/data')
-  expect((await loadAuth(configDir)).bilibili?.sessData).toBe('sess/data')
+  expect(result.cookieNames).toEqual(['SESSDATA', 'DedeUserID', 'bili_jct', 'sid'])
+  const auth = await loadAuth(configDir)
+  expect(auth.bilibili?.sessData).toBe('sess/data')
+  expect(auth.bilibili?.cookieHeader).toBe('SESSDATA=sess%2Fdata; DedeUserID=42; bili_jct=csrf; sid=abc123')
 })
 
 function viewData(id = bvid, firstCid = 111, title = '普通视频') {

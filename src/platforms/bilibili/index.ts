@@ -670,11 +670,35 @@ async function fetchJson<T>(url: string, ctx: ResolveContext): Promise<T> {
 async function biliApiHeaders(ctx: ResolveContext, url: string): Promise<Record<string, string>> {
   const headers = biliPageHeaders()
   const auth = await loadAuth(ctx.configDir).catch(() => undefined)
-  const cookies = [auth?.bilibili?.sessData ? `SESSDATA=${auth.bilibili.sessData}` : '', await loadCookieHeader(ctx.cookiesPath, url).catch(() => undefined)]
-    .filter(Boolean)
-    .join('; ')
+  const storedCookies = auth?.bilibili?.cookieHeader
+    ? normalizeStoredBiliCookieHeader(auth.bilibili.cookieHeader)
+    : auth?.bilibili?.sessData ? `SESSDATA=${canonicalCookieValue(auth.bilibili.sessData)}` : undefined
+  const fileCookies = await loadCookieHeader(ctx.cookiesPath, url).catch(() => undefined)
+  const cookies = fileCookies || storedCookies
   if (cookies) headers.Cookie = cookies
   return headers
+}
+
+function normalizeStoredBiliCookieHeader(cookieHeader: string): string {
+  return cookieHeader
+    .split(/;\s*/)
+    .map((pair) => {
+      const index = pair.indexOf('=')
+      if (index <= 0) return pair
+      const name = pair.slice(0, index)
+      const value = pair.slice(index + 1)
+      return name === 'SESSDATA' ? `${name}=${canonicalCookieValue(value)}` : pair
+    })
+    .filter(Boolean)
+    .join('; ')
+}
+
+function canonicalCookieValue(value: string): string {
+  try {
+    return encodeURIComponent(decodeURIComponent(value))
+  } catch {
+    return encodeURIComponent(value)
+  }
 }
 
 function biliPageHeaders(): Record<string, string> {

@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import QRCode from 'qrcode'
 import { getConfigDir } from './config.js'
-import { setBilibiliSessData } from './auth-store.js'
+import { setBilibiliAuth } from './auth-store.js'
 
 const requestTimeoutMs = 30_000
 const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
@@ -42,6 +42,7 @@ export type BilibiliQRPollResult = {
   message: string
   loggedIn: boolean
   sessData?: string
+  cookieNames?: string[]
 }
 
 export async function createBilibiliQRSession(options: { configDir?: string; terminal?: boolean } = {}): Promise<BilibiliQRSession> {
@@ -76,10 +77,13 @@ export async function pollBilibiliQRSession(sessionId: string, options: { config
 
   const code = payload.data?.code ?? -1
   const message = payload.data?.message || messageForQRStatus(code)
-  const sessData = extractSessData(setCookie) ?? extractSessData(payload.data?.url ?? '')
+  const cookiePairs = extractLoginCookies(setCookie, payload.data?.url ?? '')
+  const cookieHeader = cookiePairs.length ? cookiePairs.map(([name, value]) => `${name}=${value}`).join('; ') : undefined
+  const rawSessData = cookiePairs.find(([name]) => name === 'SESSDATA')?.[1] ?? extractSessData(setCookie) ?? extractSessData(payload.data?.url ?? '')
+  const sessData = rawSessData ? decodeURIComponent(rawSessData) : undefined
   if (code === 0) {
     if (!sessData) throw new Error('bilibili QR login succeeded but SESSDATA was not found')
-    await setBilibiliSessData(sessData, options.configDir ?? getConfigDir())
+    await setBilibiliAuth({ sessData, cookieHeader }, options.configDir ?? getConfigDir())
   }
 
   return {
@@ -88,6 +92,7 @@ export async function pollBilibiliQRSession(sessionId: string, options: { config
     message,
     loggedIn: code === 0,
     sessData: code === 0 ? sessData : undefined,
+    cookieNames: code === 0 ? cookiePairs.map(([name]) => name) : undefined,
   }
 }
 
@@ -126,7 +131,33 @@ async function fetchWithTimeout(url: string): Promise<Response> {
 
 function extractSessData(value: string): string | undefined {
   const match = value.match(/(?:^|[?&;\s])SESSDATA=([^;&\s]+)/)
-  return match?.[1] ? decodeURIComponent(match[1]) : undefined
+  return match?.[1]
+}
+
+const bilibiliLoginCookieNames = ['SESSDATA', 'DedeUserID', 'DedeUserID__ckMd5', 'bili_jct', 'sid', 'buvid3', 'b_nut']
+
+function extractLoginCookies(setCookieHeader: string, redirectUrl: string): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  const seen = new Set<string>()
+  const add = (name: string, value: string | undefined | null) => {
+    const trimmed = value?.trim()
+    if (!trimmed || seen.has(name)) return
+    seen.add(name)
+    out.push([name, trimmed])
+  }
+
+  for (const name of bilibiliLoginCookieNames) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const match = redirectUrl.match(new RegExp(`[?&]${escaped}=([^&#]+)`, 'i'))
+    add(name, match?.[1])
+  }
+
+  for (const name of bilibiliLoginCookieNames) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const match = setCookieHeader.match(new RegExp(`(?:^|[,;\\s])${escaped}=([^;,\\s]+)`, 'i'))
+    add(name, match?.[1])
+  }
+  return out
 }
 
 function messageForQRStatus(code: number): string {

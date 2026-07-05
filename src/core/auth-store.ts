@@ -3,6 +3,7 @@ import { getConfigDir, readJsonFile, writeJsonFile } from './config.js'
 
 export type BilibiliAuthState = {
   sessData: string
+  cookieHeader?: string
   updatedAt: string
 }
 
@@ -22,10 +23,14 @@ export async function saveAuth(auth: AuthState, configDir = getConfigDir()): Pro
   await writeJsonFile(getAuthPath(configDir), auth)
 }
 
-export async function setBilibiliSessData(sessData: string, configDir = getConfigDir()): Promise<void> {
+export async function setBilibiliAuth(state: { sessData: string; cookieHeader?: string }, configDir = getConfigDir()): Promise<void> {
   const auth = await loadAuth(configDir)
-  auth.bilibili = { sessData, updatedAt: new Date().toISOString() }
+  auth.bilibili = { sessData: state.sessData, cookieHeader: state.cookieHeader, updatedAt: new Date().toISOString() }
   await saveAuth(auth, configDir)
+}
+
+export async function setBilibiliSessData(sessData: string, configDir = getConfigDir()): Promise<void> {
+  await setBilibiliAuth({ sessData }, configDir)
 }
 
 export async function clearBilibiliAuth(configDir = getConfigDir()): Promise<void> {
