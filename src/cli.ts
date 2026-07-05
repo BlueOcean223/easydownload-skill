@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 import { readFile } from 'node:fs/promises'
 import { Command } from 'commander'
-import { z } from 'zod'
 import { clearBilibiliAuth, loadAuth } from './core/auth-store.js'
 import { createBilibiliQRSession, pollBilibiliQRSession, waitForBilibiliQRLogin } from './core/bilibili-auth.js'
 import { getConfigDir, loadConfig, setConfigValue } from './core/config.js'
-import { resolvePlatform, type PlatformId } from './core/registry.js'
+import { resolvePlatform } from './core/registry.js'
 import { runDownloadPlan, summarizeDownloadEvents } from './core/downloader.js'
 import { DownloadPlanSchema, type DownloadOptions, type ResolveContext } from './core/types.js'
 
@@ -29,7 +28,6 @@ Examples:
 
 function commonOptions(cmd: Command): Command {
   return cmd
-    .option('--platform <platform>', 'auto|douyin|xhs|bilibili|kuaishou', 'auto')
     .option('--cookies <path>', 'Netscape cookies.txt path')
     .option('--proxy <url>', 'HTTP/SOCKS proxy URL')
     .option('--json', 'print final JSON to stdout')
@@ -37,7 +35,7 @@ function commonOptions(cmd: Command): Command {
 
 function downloadOptions(cmd: Command): Command {
   return commonOptions(cmd)
-    .option('--plan <path>', 'hidden/debug: run an existing DownloadPlan JSON')
+    .option('--plan <path>', 'run a DownloadPlan JSON file; use - to read JSON from stdin')
     .option('--quality <quality>', 'quality selector', 'best')
     .option('--part <n>', '1-based part index')
     .option('--all-parts', 'download all parts')
@@ -57,14 +55,15 @@ function parsePositiveInt(value: string): number {
   return n
 }
 
-function parsePlatform(value: string): PlatformId {
-  const parsed = z.enum(['auto', 'douyin', 'xhs', 'bilibili', 'kuaishou']).safeParse(value)
-  if (!parsed.success) throw new Error(`unsupported platform: ${value}`)
-  return parsed.data
-}
-
 function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+}
+
+async function readPlanText(path: string): Promise<string> {
+  if (path !== '-') return readFile(path, 'utf8')
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 function optionValue<T = unknown>(opts: unknown, key: string): T | undefined {
@@ -121,8 +120,8 @@ async function buildResolveContext(opts: { cookies?: string; proxy?: string }): 
   }
 }
 
-async function handleInfo(input: string, opts: { platform: string; cookies?: string; proxy?: string; json?: boolean }) {
-  const platform = resolvePlatform(input, parsePlatform(opts.platform))
+async function handleInfo(input: string, opts: { cookies?: string; proxy?: string; json?: boolean }) {
+  const platform = resolvePlatform(input)
   const info = await platform.resolve(input, await buildResolveContext(opts))
   if (opts.json) return printJson(info)
   process.stdout.write(`${platform.displayName}: ${info.title}\n`)
@@ -158,7 +157,7 @@ Examples:
 `)
     .action(async (input: string, opts) => {
       try {
-        const platform = resolvePlatform(input, parsePlatform(opts.platform))
+        const platform = resolvePlatform(input)
         const info = await platform.resolve(input, await buildResolveContext(opts))
         const result = {
           platform: info.platform,
@@ -197,6 +196,8 @@ Examples:
   easydl download '<url or share text>'
   easydl download --json '<url>'
   easydl download --json-progress '<url>'
+  easydl download --plan plan.json --json-progress
+  cat plan.json | easydl download --plan - --json-progress
   easydl download --quality 1080p --part 2 '<url>'
   easydl download --all-parts '<multi-part url>'
   easydl download --images 1,3-5 '<album url>'
@@ -205,10 +206,14 @@ Examples:
       try {
         if (opts.json && opts.jsonProgress) throw new Error('--json and --json-progress cannot be used together')
         if (opts.plan) {
-          const planJson = JSON.parse(await readFile(opts.plan, 'utf8'))
+          if (input) throw new Error('--plan cannot be combined with input URL/share text')
+          const planJson = JSON.parse(await readPlanText(opts.plan))
           const parsedPlan = DownloadPlanSchema.parse(planJson)
           const plan = {
             ...parsedPlan,
+            ...(opts.outputDir ? { outputDir: opts.outputDir } : {}),
+            ...(opts.concurrency ? { concurrency: opts.concurrency } : {}),
+            ...(opts.chunkConcurrency ? { chunkConcurrency: opts.chunkConcurrency } : {}),
             ...(opts.ffmpeg ? { ffmpeg: opts.ffmpeg } : {}),
             ...(opts.proxy ? { proxy: opts.proxy } : {}),
             ...(opts.overwrite ? { overwrite: true, noOverwrite: false } : {}),
@@ -224,7 +229,7 @@ Examples:
 
         if (!input) throw new Error('missing input (or use --plan plan.json)')
         const config = await loadConfig()
-        const platform = resolvePlatform(input, parsePlatform(opts.platform))
+        const platform = resolvePlatform(input)
         const info = await platform.resolve(input, await buildResolveContext(opts))
         const downloadOptions: DownloadOptions = {
           quality: opts.quality,

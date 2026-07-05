@@ -25,6 +25,20 @@ test('download defaults to human summary and rejects mixed JSON modes', async ()
     expect(skippedSummary.artifacts).toEqual([])
     expect(skippedSummary.skipped[0]).toMatchObject({ taskId: 'hello', reason: 'file exists' })
 
+    const stdinDir = join(tmp, 'stdin-out')
+    const stdinPlan = {
+      outputDir: join(tmp, 'wrong-out'),
+      items: [{ id: 'stdin', kind: 'file', filename: 'stdin.txt', url: 'data:text/plain,stdin-plan' }],
+    }
+    const fromStdin = await runCli(['download', '--plan', '-', '--output-dir', stdinDir, '--json'], undefined, JSON.stringify(stdinPlan))
+    expect(fromStdin.code).toBe(0)
+    expect(JSON.parse(fromStdin.stdout).artifacts[0].path).toBe(join(stdinDir, 'stdin.txt'))
+    expect(await readFile(join(stdinDir, 'stdin.txt'), 'utf8')).toBe('stdin-plan')
+
+    const planWithInput = await runCli(['download', '--plan', planPath, 'https://example.com/video'])
+    expect(planWithInput.code).toBe(1)
+    expect(planWithInput.stderr).toContain('--plan cannot be combined with input')
+
     const conflict = await runCli(['download', '--json', '--json-progress', '--plan', planPath])
     expect(conflict.code).toBe(1)
     expect(conflict.stdout).toBe('')
@@ -39,6 +53,10 @@ test('help documents auth logout and logout clears stored bilibili auth', async 
   expect(help.code).toBe(0)
   expect(help.stdout).toContain('Examples:')
   expect(help.stdout).toContain('easydl auth bilibili logout')
+
+  const downloadHelp = await runCli(['download', '--help'])
+  expect(downloadHelp.code).toBe(0)
+  expect(downloadHelp.stdout).not.toContain('--platform')
 
   const authHelp = await runCli(['auth', 'bilibili', '--help'])
   expect(authHelp.code).toBe(0)
@@ -61,14 +79,15 @@ test('help documents auth logout and logout clears stored bilibili auth', async 
   }
 })
 
-function runCli(args: string[], env?: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runCli(args: string[], env?: NodeJS.ProcessEnv, stdin?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['run', 'src/cli.ts', ...args], { cwd: process.cwd(), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['run', 'src/cli.ts', ...args], { cwd: process.cwd(), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk.toString() })
     child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
     child.once('error', reject)
     child.once('exit', (code) => resolve({ code, stdout, stderr }))
+    child.stdin.end(stdin ?? '')
   })
 }
