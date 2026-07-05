@@ -152,8 +152,10 @@ class DownloadExecutor {
     const videoPath = join(tempDir, `video${extensionFromUrl(item.videoUrl, '.video')}`)
     const audioPath = join(tempDir, `audio${extensionFromUrl(item.audioUrl, '.audio')}`)
 
-    await this.downloadWithFallback(`${item.id}:video`, item.videoUrl, item.videoBackupUrls, item.headers, videoPath)
-    await this.downloadWithFallback(`${item.id}:audio`, item.audioUrl, item.audioBackupUrls, item.headers, audioPath)
+    await Promise.all([
+      this.downloadWithFallback(`${item.id}:video`, item.videoUrl, item.videoBackupUrls, item.headers, videoPath),
+      this.downloadWithFallback(`${item.id}:audio`, item.audioUrl, item.audioBackupUrls, item.headers, audioPath),
+    ])
     await runFfmpegMux(this.plan.ffmpeg, videoPath, audioPath, `${target.path}.part`)
     await finalizePart(target.path)
     await rm(tempDir, { force: true, recursive: true })

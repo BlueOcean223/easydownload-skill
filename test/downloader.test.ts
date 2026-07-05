@@ -156,6 +156,50 @@ test('creates a partial zip when some entries fail', async () => {
   expect(zip.includes(Buffer.from('bbb'))).toBe(true)
 })
 
+test('downloads dash video and audio tracks concurrently', async () => {
+  const tmp = await tempDir()
+  const fakeFfmpeg = join(tmp, 'fake-ffmpeg.sh')
+  await writeFile(fakeFfmpeg, '#!/bin/sh\nfor last do :; done\nprintf muxed > "$last"\n')
+  await chmod(fakeFfmpeg, 0o700)
+
+  const body = Buffer.from('track-bytes')
+  let inFlight = 0
+  let maxInFlight = 0
+  const server: Server = createServer(async (req, res) => {
+    inFlight++
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    await delay(30)
+    const range = req.headers.range
+    const match = typeof range === 'string' ? range.match(/^bytes=(\d+)-(\d*)$/) : null
+    if (match) {
+      const start = Number.parseInt(match[1], 10)
+      const end = Math.min(match[2] ? Number.parseInt(match[2], 10) : body.length - 1, body.length - 1)
+      const chunk = body.subarray(start, end + 1)
+      res.writeHead(206, { 'accept-ranges': 'bytes', 'content-length': String(chunk.byteLength), 'content-range': `bytes ${start}-${end}/${body.length}` })
+      res.end(chunk, () => inFlight--)
+      return
+    }
+    res.writeHead(200, { 'accept-ranges': 'bytes', 'content-length': String(body.byteLength) })
+    res.end(body, () => inFlight--)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  cleanups.push(() => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('server did not listen on tcp')
+  const base = `http://127.0.0.1:${address.port}`
+
+  const events = await runDownloadPlan({
+    outputDir: tmp,
+    ffmpeg: fakeFfmpeg,
+    multipartThresholdBytes: 1024 * 1024,
+    items: [{ id: 'dash-concurrent', kind: 'dash', filename: 'merged.mp4', videoUrl: `${base}/video.mp4`, audioUrl: `${base}/audio.m4a` }],
+  })
+  const summary = summarizeDownloadEvents(events)
+
+  expect(summary.success).toBe(true)
+  expect(maxInFlight).toBeGreaterThan(1)
+})
+
 test('downloads dash tracks and invokes configured ffmpeg', async () => {
   const tmp = await tempDir()
   const server = await fixtureServer({ '/video.mp4': 'video-bytes', '/audio.m4a': 'audio-bytes' })
