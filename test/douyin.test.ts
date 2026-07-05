@@ -66,7 +66,8 @@ test('uses ratio probing when share video lacks bit_rate URLs', async () => {
     if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) {
       const parsed = new URL(url)
       const ratio = parsed.searchParams.get('ratio')
-      if (ratio === '1080p') {
+      if (ratio === '1080p') throw new Error('should not probe above source resolution')
+      if (ratio === '720p') {
         return new Response('xx', {
           status: 206,
           headers: { 'content-range': 'bytes 0-1/12345', 'content-type': 'video/mp4' },
@@ -78,7 +79,38 @@ test('uses ratio probing when share video lacks bit_rate URLs', async () => {
   })
 
   const info = await douyinPlatform.resolve(`https://www.douyin.com/video/${awemeId}`, { configDir: '/tmp/easydl-test' })
-  expect(info.streams?.[0]).toMatchObject({ id: '1080p', size: 12345 })
+  expect(info.streams?.[0]).toMatchObject({ id: '720p', size: 12345 })
+})
+
+test('retries share page with ttwid when router data is hidden', async () => {
+  mockFetch(async (url, init) => {
+    const headers = init?.headers as Record<string, string> | undefined
+    if (url === `https://www.iesdouyin.com/share/video/${awemeId}/?app=aweme`) {
+      if (headers?.Cookie === 'ttwid=test-token') return htmlResponse(routerDataHtml(videoItemWithoutBitrate()))
+      return htmlResponse('<html>open app</html>')
+    }
+    if (url === 'https://ttwid.bytedance.com/ttwid/union/register/') {
+      return new Response('{}', { status: 200, headers: { 'set-cookie': 'ttwid=test-token; Path=/; Domain=bytedance.com' } })
+    }
+    if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) {
+      return new Response('xx', { status: 206, headers: { 'content-range': 'bytes 0-1/222', 'content-type': 'video/mp4' } })
+    }
+    throw new Error(`unexpected fetch ${url} ${JSON.stringify(init?.headers)}`)
+  })
+
+  const info = await douyinPlatform.resolve(`https://www.douyin.com/video/${awemeId}`, { configDir: '/tmp/easydl-test' })
+  expect(info.streams?.[0]).toMatchObject({ id: '720p', size: 222 })
+})
+
+test('does not expose unplayable play_addr URLs when ratio probing fails', async () => {
+  mockFetch(async (url) => {
+    if (url === `https://www.iesdouyin.com/share/video/${awemeId}/?app=aweme`) return htmlResponse(routerDataHtml(videoItemWithoutBitrate()))
+    if (url === `https://www.iesdouyin.com/share/note/${awemeId}/?app=aweme`) return new Response('not found', { status: 404 })
+    if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) return new Response('', { status: 404 })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  await expect(douyinPlatform.resolve(`https://www.douyin.com/video/${awemeId}`, { configDir: '/tmp/easydl-test' })).rejects.toThrow('no playable video URL')
 })
 
 function videoItem() {

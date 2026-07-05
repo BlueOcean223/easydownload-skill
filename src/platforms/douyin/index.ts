@@ -4,6 +4,7 @@ const defaultUserAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X)
 const defaultReferer = 'https://www.douyin.com/'
 const shareBase = 'https://www.iesdouyin.com/share'
 const playBaseUrl = 'https://aweme.snssdk.com/aweme/v1/play/'
+const ttwidRegisterUrl = 'https://ttwid.bytedance.com/ttwid/union/register/'
 const requestTimeoutMs = 30_000
 
 const douyinHostPattern = /(?:^|\/\/)(?:[^/]+\.)?(?:douyin\.com|iesdouyin\.com)(?:[/:?#]|$)|(?:^|\/\/)v\.douyin\.com(?:[/:?#]|$)/i
@@ -163,7 +164,7 @@ async function fetchShareInfo(awemeId: string, ctx: ResolveContext): Promise<Med
       const item = await fetchSharePageItem(`${shareBase}/${kind}/${awemeId}/?app=aweme`, ctx)
       const info = await buildMediaInfo(item, awemeId, ctx)
       if (isUsable(info)) return info
-      firstErr ??= new Error('douyin share item has no downloadable media')
+      firstErr ??= new Error('douyin share item has metadata but no playable video URL; play endpoint returned no usable video stream, so the item may be removed, restricted, or app-only')
     } catch (err) {
       firstErr ??= err
     }
@@ -172,7 +173,18 @@ async function fetchShareInfo(awemeId: string, ctx: ResolveContext): Promise<Med
 }
 
 async function fetchSharePageItem(url: string, ctx: ResolveContext): Promise<Record<string, unknown>> {
-  const response = await fetchWithTimeout(url, { headers: douyinPageHeaders() }, ctx.proxy)
+  try {
+    return await fetchSharePageItemOnce(url, ctx)
+  } catch (err) {
+    if (!shouldRetrySharePageWithTtwid(err)) throw err
+    const cookie = await createDouyinTtwidCookie(ctx).catch(() => undefined)
+    if (!cookie) throw err
+    return fetchSharePageItemOnce(url, ctx, cookie)
+  }
+}
+
+async function fetchSharePageItemOnce(url: string, ctx: ResolveContext, cookieHeader?: string): Promise<Record<string, unknown>> {
+  const response = await fetchWithTimeout(url, { headers: douyinPageHeaders(cookieHeader) }, ctx.proxy)
   if (response.status === 403 || response.status === 429) throw new Error('douyin request rate limited')
   if (!response.ok) throw new Error(`douyin share page HTTP ${response.status}`)
 
@@ -188,6 +200,31 @@ async function fetchSharePageItem(url: string, ctx: ResolveContext): Promise<Rec
     if (Object.keys(item).length > 0) return item
   }
   throw new Error('douyin item not found in router data')
+}
+
+function shouldRetrySharePageWithTtwid(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('router data not found') || message.includes('item not found in router data')
+}
+
+async function createDouyinTtwidCookie(ctx: ResolveContext): Promise<string | undefined> {
+  const body = {
+    region: 'cn',
+    aid: 1768,
+    needFid: false,
+    service: 'www.ixigua.com',
+    migrate_info: { ticket: '', source: 'node' },
+    cbUrlProtocol: 'https',
+    union: true,
+  }
+  const response = await fetchWithTimeout(ttwidRegisterUrl, {
+    method: 'POST',
+    headers: { 'User-Agent': defaultUserAgent, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, ctx.proxy)
+  await response.body?.cancel().catch(() => undefined)
+  const value = response.headers.get('set-cookie')?.match(/(?:^|[,\s])ttwid=([^;,\s]+)/)?.[1]
+  return value ? `ttwid=${value}` : undefined
 }
 
 async function buildMediaInfo(item: Record<string, unknown>, fallbackId: string, ctx: ResolveContext): Promise<MediaInfo> {
@@ -230,7 +267,6 @@ async function buildMediaInfo(item: Record<string, unknown>, fallbackId: string,
 
 function parseStreams(video: Record<string, unknown>): ParsedStream[] {
   const bitRates = Array.isArray(video.bit_rate) ? video.bit_rate : []
-  const playAddr = getRecord(video.play_addr)
   const fallbackWidth = getNumber(video, 'width')
   const fallbackHeight = getNumber(video, 'height')
   const streams: ParsedStream[] = []
@@ -255,16 +291,6 @@ function parseStreams(video: Record<string, unknown>): ParsedStream[] {
       headers: douyinDownloadHeaders(),
       bitrate: getNumber(br, 'bit_rate'),
     })
-  }
-
-  if (streams.length === 0) {
-    const url = pickNoWatermarkUrl(getArray(playAddr.url_list))
-    if (url) {
-      const width = getNumber(playAddr, 'width') || fallbackWidth
-      const height = getNumber(playAddr, 'height') || fallbackHeight
-      const quality = resolutionKey(width, height) || 'source'
-      streams.push({ id: quality, quality, qualityName: quality, width: width || undefined, height: height || undefined, url, backupUrls: [], headers: douyinDownloadHeaders() })
-    }
   }
 
   return sortStreams(streams)
@@ -300,7 +326,8 @@ function extractImageVideoUrl(image: Record<string, unknown>): string | undefine
 
 async function probeRatioStreams(uri: string, sourceW: number, sourceH: number, ctx: ResolveContext): Promise<ParsedStream[]> {
   if (!uri) return []
-  const ratios = ['1080p', '720p', '540p', '480p', '360p']
+  const maxSourceResolution = sourceW > 0 && sourceH > 0 ? Math.min(sourceW, sourceH) : 0
+  const ratios = ['1080p', '720p', '540p', '480p', '360p'].filter((ratio) => !maxSourceResolution || Number.parseInt(ratio, 10) <= maxSourceResolution)
   const seenSizes = new Set<number>()
   const streams: ParsedStream[] = []
   for (const ratio of ratios) {
@@ -385,13 +412,14 @@ function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
   return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
-function douyinPageHeaders(): Record<string, string> {
+function douyinPageHeaders(cookieHeader?: string): Record<string, string> {
   return {
     'User-Agent': defaultUserAgent,
     Accept: 'application/json, text/plain, */*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     Origin: 'https://www.douyin.com',
     Referer: defaultReferer,
+    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
   }
 }
 
