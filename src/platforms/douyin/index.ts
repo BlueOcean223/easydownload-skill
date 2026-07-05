@@ -16,9 +16,9 @@ export const douyinPlatform: Platform = {
   match(input: string): boolean {
     return douyinHostPattern.test(input)
   },
-  async resolve(input: string, _ctx: ResolveContext): Promise<MediaInfo> {
-    const awemeId = await parseDouyinInput(input)
-    return fetchShareInfo(awemeId)
+  async resolve(input: string, ctx: ResolveContext): Promise<MediaInfo> {
+    const awemeId = await parseDouyinInput(input, ctx)
+    return fetchShareInfo(awemeId, ctx)
   },
   async createDownloadPlan(info: MediaInfo, options: DownloadOptions): Promise<DownloadPlan> {
     if (info.platform !== 'douyin') throw new Error(`expected douyin MediaInfo, got ${info.platform}`)
@@ -30,6 +30,7 @@ export const douyinPlatform: Platform = {
       chunkConcurrency: options.chunkConcurrency ?? 4,
       multipartThresholdBytes: 32 * 1024 * 1024,
       timeoutMs: 30_000,
+      ...(options.proxy ? { proxy: options.proxy } : {}),
       ffmpeg: 'ffmpeg',
       overwrite: Boolean(options.overwrite),
       noOverwrite: Boolean(options.noOverwrite),
@@ -94,25 +95,25 @@ export const douyinPlatform: Platform = {
   },
 }
 
-async function parseDouyinInput(input: string): Promise<string> {
+async function parseDouyinInput(input: string, ctx: ResolveContext): Promise<string> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('no douyin url found in input')
   if (numericIdPattern.test(trimmed)) return trimmed
 
   const url = extractShareUrl(trimmed)
   if (!url) throw new Error('no douyin url found in input')
-  return parseDouyinUrl(url, 0)
+  return parseDouyinUrl(url, 0, ctx)
 }
 
-async function parseDouyinUrl(rawUrl: string, depth: number): Promise<string> {
+async function parseDouyinUrl(rawUrl: string, depth: number, ctx: ResolveContext): Promise<string> {
   if (depth > 5) throw new Error('douyin short link resolution failed: too many redirects')
   const url = new URL(trimUrl(rawUrl))
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('invalid douyin url scheme')
   const host = url.hostname.toLowerCase()
 
   if (host === 'v.douyin.com') {
-    const next = await resolveShortLink(url.href)
-    return parseDouyinUrl(next, depth + 1)
+    const next = await resolveShortLink(url.href, ctx)
+    return parseDouyinUrl(next, depth + 1, ctx)
   }
   if (!isDouyinHost(host)) throw new Error(`invalid douyin host: ${host}`)
 
@@ -121,8 +122,8 @@ async function parseDouyinUrl(rawUrl: string, depth: number): Promise<string> {
   return id
 }
 
-async function resolveShortLink(shortUrl: string): Promise<string> {
-  const response = await fetchWithTimeout(shortUrl, { redirect: 'manual', headers: douyinPageHeaders() })
+async function resolveShortLink(shortUrl: string, ctx: ResolveContext): Promise<string> {
+  const response = await fetchWithTimeout(shortUrl, { redirect: 'manual', headers: douyinPageHeaders() }, ctx.proxy)
   await response.body?.cancel().catch(() => undefined)
   const location = response.headers.get('location')
   if (location && response.status >= 300 && response.status < 400) return new URL(location, shortUrl).href
@@ -155,12 +156,12 @@ function extractAwemeId(url: URL): string | undefined {
   return url.searchParams.get('modal_id') ?? url.searchParams.get('aweme_id') ?? undefined
 }
 
-async function fetchShareInfo(awemeId: string): Promise<MediaInfo> {
+async function fetchShareInfo(awemeId: string, ctx: ResolveContext): Promise<MediaInfo> {
   let firstErr: unknown
   for (const kind of ['video', 'note']) {
     try {
-      const item = await fetchSharePageItem(`${shareBase}/${kind}/${awemeId}/?app=aweme`)
-      const info = await buildMediaInfo(item, awemeId)
+      const item = await fetchSharePageItem(`${shareBase}/${kind}/${awemeId}/?app=aweme`, ctx)
+      const info = await buildMediaInfo(item, awemeId, ctx)
       if (isUsable(info)) return info
       firstErr ??= new Error('douyin share item has no downloadable media')
     } catch (err) {
@@ -170,8 +171,8 @@ async function fetchShareInfo(awemeId: string): Promise<MediaInfo> {
   throw new Error(`douyin item fetch failed: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}`)
 }
 
-async function fetchSharePageItem(url: string): Promise<Record<string, unknown>> {
-  const response = await fetchWithTimeout(url, { headers: douyinPageHeaders() })
+async function fetchSharePageItem(url: string, ctx: ResolveContext): Promise<Record<string, unknown>> {
+  const response = await fetchWithTimeout(url, { headers: douyinPageHeaders() }, ctx.proxy)
   if (response.status === 403 || response.status === 429) throw new Error('douyin request rate limited')
   if (!response.ok) throw new Error(`douyin share page HTTP ${response.status}`)
 
@@ -189,7 +190,7 @@ async function fetchSharePageItem(url: string): Promise<Record<string, unknown>>
   throw new Error('douyin item not found in router data')
 }
 
-async function buildMediaInfo(item: Record<string, unknown>, fallbackId: string): Promise<MediaInfo> {
+async function buildMediaInfo(item: Record<string, unknown>, fallbackId: string, ctx: ResolveContext): Promise<MediaInfo> {
   const id = firstNonEmpty(getString(item, 'aweme_id'), fallbackId)
   const desc = firstNonEmpty(getString(item, 'desc'), id)
   const author = getRecord(item.author)
@@ -212,7 +213,7 @@ async function buildMediaInfo(item: Record<string, unknown>, fallbackId: string)
 
   let streams = parseStreams(video)
   if (streams.length === 0) {
-    streams = await probeRatioStreams(getString(getRecord(video.play_addr), 'uri'), getNumber(getRecord(video.play_addr), 'width') || getNumber(video, 'width'), getNumber(getRecord(video.play_addr), 'height') || getNumber(video, 'height'))
+    streams = await probeRatioStreams(getString(getRecord(video.play_addr), 'uri'), getNumber(getRecord(video.play_addr), 'width') || getNumber(video, 'width'), getNumber(getRecord(video.play_addr), 'height') || getNumber(video, 'height'), ctx)
   }
 
   return {
@@ -297,14 +298,14 @@ function extractImageVideoUrl(image: Record<string, unknown>): string | undefine
   return uri ? buildPlayUrl(uri, resolutionKey(getNumber(image, 'width'), getNumber(image, 'height'))) : undefined
 }
 
-async function probeRatioStreams(uri: string, sourceW: number, sourceH: number): Promise<ParsedStream[]> {
+async function probeRatioStreams(uri: string, sourceW: number, sourceH: number, ctx: ResolveContext): Promise<ParsedStream[]> {
   if (!uri) return []
   const ratios = ['1080p', '720p', '540p', '480p', '360p']
   const seenSizes = new Set<number>()
   const streams: ParsedStream[] = []
   for (const ratio of ratios) {
     const url = buildPlayUrl(uri, ratio)
-    const response = await fetchWithTimeout(url, { headers: { ...douyinDownloadHeaders(), Range: 'bytes=0-1', Accept: '*/*' } }).catch(() => undefined)
+    const response = await fetchWithTimeout(url, { headers: { ...douyinDownloadHeaders(), Range: 'bytes=0-1', Accept: '*/*' } }, ctx.proxy).catch(() => undefined)
     if (!response) continue
     await response.body?.cancel().catch(() => undefined)
     const total = parseTotalFromContentRange(response.headers.get('content-range'))
@@ -365,17 +366,23 @@ function extractJSONObjectAfterMarker(html: string, marker: string): string {
   throw new Error('douyin router data not found')
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, proxy?: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
+  const requestInit = withProxy({ ...init, signal: controller.signal }, proxy)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, requestInit)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') throw new Error(`douyin request timed out after ${requestTimeoutMs}ms`)
     throw err
   } finally {
     clearTimeout(timer)
   }
+}
+
+function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
+  const trimmed = proxy?.trim()
+  return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
 function douyinPageHeaders(): Record<string, string> {

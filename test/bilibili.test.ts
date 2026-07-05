@@ -73,10 +73,14 @@ test('adds subtitle file items to video plans when player v2 exposes subtitles',
   expect(plan.items[1]).toMatchObject({ kind: 'file', url: 'https://subtitle.example.com/zh.json' })
 })
 
-test('resolves collection URLs into all-part DASH plans', async () => {
+test('resolves collection and list URLs into all-part DASH plans', async () => {
   mockFetch(async (url) => {
     if (url.includes('/x/polymer/web-space/seasons_archives_list')) {
-      return jsonResponse({ code: 0, data: { meta: { name: '收藏夹' }, archives: [{ bvid: 'BVcol1' }, { bvid: 'BVcol2' }] } })
+      const parsed = new URL(url)
+      expect(parsed.searchParams.get('mid')).toBe('123')
+      expect(parsed.searchParams.get('season_id')).toBe('456')
+      const page = Number.parseInt(parsed.searchParams.get('page_num') ?? '1', 10)
+      return jsonResponse({ code: 0, data: { meta: { name: '收藏夹' }, archives: page === 1 ? [{ bvid: 'BVcol1' }, { bvid: 'BVcol2' }] : [] } })
     }
     if (url.includes('/x/web-interface/view')) {
       const parsed = new URL(url)
@@ -92,10 +96,21 @@ test('resolves collection URLs into all-part DASH plans', async () => {
     throw new Error(`unexpected fetch ${url}`)
   })
 
-  const info = await bilibiliPlatform.resolve('https://space.bilibili.com/123/channel/collectiondetail?sid=456', { configDir: '/tmp/easydl-test' })
-  expect(info.title).toBe('收藏夹')
-  expect(info.parts?.map((part) => part.title)).toEqual(['[01] BVcol1 标题', '[02] BVcol2 标题'])
+  const inputs = [
+    'https://space.bilibili.com/123/channel/collectiondetail?sid=456',
+    'https://space.bilibili.com/123/lists?sid=456',
+    'https://space.bilibili.com/123/lists/456',
+    'https://www.bilibili.com/list/123/?sid=456',
+    'https://m.bilibili.com/space/123/lists/456',
+  ]
 
+  for (const input of inputs) {
+    const info = await bilibiliPlatform.resolve(input, { configDir: '/tmp/easydl-test' })
+    expect(info.title).toBe('收藏夹')
+    expect(info.parts?.map((part) => part.title)).toEqual(['[01] BVcol1 标题', '[02] BVcol2 标题'])
+  }
+
+  const info = await bilibiliPlatform.resolve(inputs[0], { configDir: '/tmp/easydl-test' })
   const plan = await bilibiliPlatform.createDownloadPlan(info, { outputDir: '/tmp/out', allParts: true, quality: '80' })
   expect(plan.items).toHaveLength(2)
   expect(plan.items[0]).toMatchObject({ kind: 'dash', videoUrl: 'https://video.example.com/111-80.m4s' })

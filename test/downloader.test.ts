@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runDownloadPlan, summarizeDownloadEvents } from '../src/core/downloader.js'
 
+const originalFetch = globalThis.fetch
 const cleanups: Array<() => Promise<void> | void> = []
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch
   while (cleanups.length > 0) await cleanups.pop()?.()
 })
 
@@ -58,6 +60,28 @@ test('uses multipart chunks above the threshold', async () => {
   expect(summary.success).toBe(true)
   expect(await readFile(join(tmp, 'big.bin'))).toEqual(body)
   expect(server.rangeRequests()).toBeGreaterThan(1)
+})
+
+test('passes proxy option to fetch requests', async () => {
+  const tmp = await tempDir()
+  const seenProxy: Array<string | undefined> = []
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seenProxy.push((init as RequestInit & { proxy?: string } | undefined)?.proxy)
+    const headers = new Headers({ 'content-length': '2' })
+    if ((init?.headers as Record<string, string> | undefined)?.Range) headers.set('content-range', 'bytes 0-1/2')
+    return Promise.resolve(new Response('ok', { status: 200, headers }))
+  }) as typeof fetch
+
+  const events = await runDownloadPlan({
+    outputDir: tmp,
+    proxy: 'http://127.0.0.1:8888',
+    items: [{ id: 'proxied', kind: 'file', url: 'https://example.com/file.txt', filename: 'file.txt' }],
+  })
+  const summary = summarizeDownloadEvents(events)
+
+  expect(summary.success).toBe(true)
+  expect(seenProxy.length).toBeGreaterThanOrEqual(2)
+  expect(seenProxy.every((value) => value === 'http://127.0.0.1:8888')).toBe(true)
 })
 
 test('respects item concurrency limit', async () => {

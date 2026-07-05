@@ -35,9 +35,9 @@ export const kuaishouPlatform: Platform = {
   match(input: string): boolean {
     return kuaishouPattern.test(input)
   },
-  async resolve(input: string, _ctx: ResolveContext): Promise<MediaInfo> {
-    const photoId = await resolvePhotoId(input)
-    const data = await fetchPhotoInfo(photoId)
+  async resolve(input: string, ctx: ResolveContext): Promise<MediaInfo> {
+    const photoId = await resolvePhotoId(input, ctx)
+    const data = await fetchPhotoInfo(photoId, ctx)
     return buildMediaInfo(data, photoId)
   },
   async createDownloadPlan(info: MediaInfo, options: DownloadOptions): Promise<DownloadPlan> {
@@ -50,6 +50,7 @@ export const kuaishouPlatform: Platform = {
       chunkConcurrency: options.chunkConcurrency ?? 4,
       multipartThresholdBytes: 32 * 1024 * 1024,
       timeoutMs: 30_000,
+      ...(options.proxy ? { proxy: options.proxy } : {}),
       ffmpeg: 'ffmpeg',
       overwrite: Boolean(options.overwrite),
       noOverwrite: Boolean(options.noOverwrite),
@@ -132,7 +133,7 @@ export const kuaishouPlatform: Platform = {
   },
 }
 
-async function resolvePhotoId(input: string): Promise<string> {
+async function resolvePhotoId(input: string, ctx: ResolveContext): Promise<string> {
   const direct = extractPhotoId(input)
   if (direct) return direct
 
@@ -144,7 +145,7 @@ async function resolvePhotoId(input: string): Promise<string> {
 
   let current = url
   for (let i = 0; i < 6; i++) {
-    const response = await fetchWithTimeout(current, { headers: downloadHeaders, redirect: 'manual' })
+    const response = await fetchWithTimeout(current, { headers: downloadHeaders, redirect: 'manual' }, 30_000, ctx.proxy)
     await response.body?.cancel().catch(() => undefined)
 
     const fromResponseUrl = extractPhotoId(response.url)
@@ -188,7 +189,7 @@ function extractFirstUrl(input: string): string | undefined {
   return match?.[0]?.replace(/[.,!?;:，。！？；：]+$/, '')
 }
 
-async function fetchPhotoInfo(photoId: string): Promise<KuaishouAPIResponse> {
+async function fetchPhotoInfo(photoId: string, ctx: ResolveContext): Promise<KuaishouAPIResponse> {
   const response = await fetchWithTimeout(apiURL, {
     method: 'POST',
     headers: apiHeaders,
@@ -197,7 +198,7 @@ async function fetchPhotoInfo(photoId: string): Promise<KuaishouAPIResponse> {
       subBiz: 'BROWSE_SLIDE_PHOTO',
       kpn: 'KUAISHOU',
     }),
-  })
+  }, 30_000, ctx.proxy)
   if (!response.ok) throw new Error(`kuaishou API HTTP ${response.status}`)
 
   const data = (await response.json()) as KuaishouAPIResponse
@@ -206,17 +207,23 @@ async function fetchPhotoInfo(photoId: string): Promise<KuaishouAPIResponse> {
   return data
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 30_000): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 30_000, proxy?: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const requestInit = withProxy({ ...init, signal: controller.signal }, proxy)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, requestInit)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') throw new Error(`kuaishou request timed out after ${timeoutMs}ms`)
     throw err
   } finally {
     clearTimeout(timer)
   }
+}
+
+function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
+  const trimmed = proxy?.trim()
+  return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
 function buildMediaInfo(data: KuaishouAPIResponse, fallbackPhotoId: string): MediaInfo {

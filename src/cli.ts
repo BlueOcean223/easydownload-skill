@@ -61,6 +61,13 @@ function printError(err: unknown): void {
   process.stderr.write(`Error: ${msg}\n`)
 }
 
+function printDownloadSummary(summary: ReturnType<typeof summarizeDownloadEvents>): void {
+  process.stdout.write(summary.success ? 'Download completed\n' : 'Download completed with failures\n')
+  for (const artifact of summary.artifacts) process.stdout.write(`artifact: ${artifact.path}${artifact.partial ? ' (partial)' : ''}\n`)
+  for (const skipped of summary.skipped) process.stdout.write(`skipped: ${skipped.path} (${skipped.reason})\n`)
+  for (const failure of summary.failures) process.stdout.write(`failure: ${failure.taskId}: ${failure.error}\n`)
+}
+
 function parseImageSelection(value?: string): number[] | undefined {
   if (!value?.trim()) return undefined
   const out = new Set<number>()
@@ -145,13 +152,15 @@ program.addCommand(
     .argument('[input]', 'link or share text')
     .action(async (input: string | undefined, opts) => {
       try {
+        if (opts.json && opts.jsonProgress) throw new Error('--json and --json-progress cannot be used together')
         if (opts.plan) {
           const planJson = JSON.parse(await readFile(opts.plan, 'utf8'))
           const parsedPlan = DownloadPlanSchema.parse(planJson)
-          const plan = opts.ffmpeg ? { ...parsedPlan, ffmpeg: opts.ffmpeg } : parsedPlan
+          const plan = { ...parsedPlan, ...(opts.ffmpeg ? { ffmpeg: opts.ffmpeg } : {}), ...(opts.proxy ? { proxy: opts.proxy } : {}) }
           const events = await runDownloadPlan(plan, { jsonProgress: Boolean(opts.jsonProgress) })
           const summary = summarizeDownloadEvents(events)
-          if (opts.json || !opts.jsonProgress) printJson(summary)
+          if (opts.json) printJson(summary)
+          else if (!opts.jsonProgress) printDownloadSummary(summary)
           if (!summary.success) process.exitCode = 1
           return
         }
@@ -178,7 +187,8 @@ program.addCommand(
         const plan = ffmpeg ? { ...createdPlan, ffmpeg } : createdPlan
         const events = await runDownloadPlan(plan, { jsonProgress: Boolean(opts.jsonProgress) })
         const summary = summarizeDownloadEvents(events)
-        if (opts.json || !opts.jsonProgress) printJson(summary)
+        if (opts.json) printJson(summary)
+        else if (!opts.jsonProgress) printDownloadSummary(summary)
         if (!summary.success) process.exitCode = 1
       } catch (err) {
         printError(err)

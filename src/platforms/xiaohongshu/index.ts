@@ -28,7 +28,7 @@ export const xiaohongshuPlatform: Platform = {
     return xhsHostPattern.test(input) || noteIdExactPattern.test(input.trim())
   },
   async resolve(input: string, ctx: ResolveContext): Promise<MediaInfo> {
-    const parsed = await parseXhsInput(input)
+    const parsed = await parseXhsInput(input, ctx)
     const info = await fetchNoteInfo(parsed, ctx)
     return info
   },
@@ -42,6 +42,7 @@ export const xiaohongshuPlatform: Platform = {
       chunkConcurrency: options.chunkConcurrency ?? 4,
       multipartThresholdBytes: 32 * 1024 * 1024,
       timeoutMs: 30_000,
+      ...(options.proxy ? { proxy: options.proxy } : {}),
       ffmpeg: 'ffmpeg',
       overwrite: Boolean(options.overwrite),
       noOverwrite: Boolean(options.noOverwrite),
@@ -111,17 +112,17 @@ type ParsedInput = {
   xsecToken?: string
 }
 
-async function parseXhsInput(input: string): Promise<ParsedInput> {
+async function parseXhsInput(input: string, ctx: ResolveContext): Promise<ParsedInput> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('no xiaohongshu url found in input')
   if (noteIdExactPattern.test(trimmed)) return { noteId: trimmed.toLowerCase() }
 
   const url = extractShareUrl(trimmed)
   if (!url) throw new Error('no xiaohongshu url found in input')
-  return parseXhsUrl(url, 0)
+  return parseXhsUrl(url, 0, ctx)
 }
 
-async function parseXhsUrl(rawUrl: string, depth: number): Promise<ParsedInput> {
+async function parseXhsUrl(rawUrl: string, depth: number, ctx: ResolveContext): Promise<ParsedInput> {
   if (depth > 5) throw new Error('xiaohongshu short link resolution failed: too many redirects')
 
   const url = new URL(trimUrl(rawUrl))
@@ -129,8 +130,8 @@ async function parseXhsUrl(rawUrl: string, depth: number): Promise<ParsedInput> 
 
   const host = url.hostname.toLowerCase()
   if (isShortHost(host)) {
-    const resolved = await resolveShortLink(url.href)
-    return parseXhsUrl(resolved, depth + 1)
+    const resolved = await resolveShortLink(url.href, ctx)
+    return parseXhsUrl(resolved, depth + 1, ctx)
   }
   if (!isXhsHost(host)) throw new Error(`invalid xiaohongshu host: ${host}`)
 
@@ -146,7 +147,7 @@ async function parseXhsUrl(rawUrl: string, depth: number): Promise<ParsedInput> 
   }
 }
 
-async function resolveShortLink(shortUrl: string): Promise<string> {
+async function resolveShortLink(shortUrl: string, ctx: ResolveContext): Promise<string> {
   const candidates = [shortUrl]
   const parsed = new URL(shortUrl)
   if (parsed.protocol === 'http:') {
@@ -157,7 +158,7 @@ async function resolveShortLink(shortUrl: string): Promise<string> {
   let lastErr: unknown
   for (const candidate of candidates) {
     try {
-      return await resolveShortLinkOnce(candidate)
+      return await resolveShortLinkOnce(candidate, ctx)
     } catch (err) {
       lastErr = err
     }
@@ -165,7 +166,7 @@ async function resolveShortLink(shortUrl: string): Promise<string> {
   throw new Error(`xiaohongshu short link resolution failed: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`)
 }
 
-async function resolveShortLinkOnce(shortUrl: string): Promise<string> {
+async function resolveShortLinkOnce(shortUrl: string, ctx: ResolveContext): Promise<string> {
   const response = await fetchWithTimeout(shortUrl, {
     redirect: 'manual',
     headers: {
@@ -173,7 +174,7 @@ async function resolveShortLinkOnce(shortUrl: string): Promise<string> {
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     },
-  })
+  }, ctx.proxy)
 
   const location = response.headers.get('location')
   if (location && response.status >= 300 && response.status < 400) {
@@ -218,7 +219,7 @@ function extractShareUrl(input: string): string | undefined {
 async function fetchNoteInfo(input: ParsedInput, ctx: ResolveContext): Promise<MediaInfo> {
   const noteUrl = buildExploreUrl(input.noteId, input.xsecToken)
   const headers = await xhsPageHeaders(ctx.cookiesPath, noteUrl)
-  const response = await fetchWithTimeout(noteUrl, { headers })
+  const response = await fetchWithTimeout(noteUrl, { headers }, ctx.proxy)
 
   if (response.status === 404) throw new Error('xhs note not found')
   if (response.status === 429) throw new Error('xhs request rate limited')
@@ -483,17 +484,23 @@ function jsToJson(js: string): string {
   return result
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, proxy?: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
+  const requestInit = withProxy({ ...init, signal: controller.signal }, proxy)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, requestInit)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') throw new Error(`xhs request timed out after ${requestTimeoutMs}ms`)
     throw err
   } finally {
     clearTimeout(timer)
   }
+}
+
+function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
+  const trimmed = proxy?.trim()
+  return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
 function urlsFromInfoList(value: unknown): string[] {

@@ -30,7 +30,7 @@ export const bilibiliPlatform: Platform = {
     return bilibiliPattern.test(input)
   },
   async resolve(input: string, ctx: ResolveContext): Promise<MediaInfo> {
-    const parsed = await parseBilibiliInput(input)
+    const parsed = await parseBilibiliInput(input, ctx)
     if (parsed.kind === 'bangumi') return resolveBangumi(parsed, ctx)
     if (parsed.kind === 'collection' || parsed.kind === 'series' || parsed.kind === 'mediaList') return resolveBiliPlaylist(parsed, ctx)
     if (parsed.kind === 'cheese') return resolveCheese(parsed, ctx)
@@ -47,6 +47,7 @@ export const bilibiliPlatform: Platform = {
       chunkConcurrency: options.chunkConcurrency ?? 4,
       multipartThresholdBytes: 32 * 1024 * 1024,
       timeoutMs: 30_000,
+      ...(options.proxy ? { proxy: options.proxy } : {}),
       ffmpeg: 'ffmpeg',
       overwrite: Boolean(options.overwrite),
       noOverwrite: Boolean(options.noOverwrite),
@@ -94,7 +95,7 @@ export const bilibiliPlatform: Platform = {
   },
 }
 
-async function parseBilibiliInput(input: string): Promise<ParsedBiliInput> {
+async function parseBilibiliInput(input: string, ctx: ResolveContext): Promise<ParsedBiliInput> {
   const trimmed = input.trim()
   if (!trimmed) throw new Error('empty bilibili input')
 
@@ -103,7 +104,7 @@ async function parseBilibiliInput(input: string): Promise<ParsedBiliInput> {
 
   const rawUrl = extractShareUrl(trimmed)
   if (!rawUrl) throw new Error('could not extract bilibili URL or identifier')
-  const resolvedUrl = await resolveB23IfNeeded(rawUrl)
+  const resolvedUrl = await resolveB23IfNeeded(rawUrl, ctx)
   const normalized = normalizeBiliUrl(resolvedUrl)
   const parsed = parseBiliIdentifier(normalized)
   if (parsed) return parsed
@@ -123,14 +124,15 @@ function parseBiliIdentifier(input: string): ParsedBiliInput | undefined {
     if (host.endsWith('bilibili.com') && url.pathname.replace(/\/+$/, '') === '/cheese') return { kind: 'cheese', idKind: 'paid' }
     const gongfang = `${host}${url.pathname}`.match(/gf\.bilibili\.com\/order\/hyg-download\/(\d+)/i)?.[1]
     if (gongfang) return { kind: 'gongfang', orderId: gongfang }
-    const collection = `${host}${url.pathname}${url.search}`.match(/space\.bilibili\.com\/(\d+)\/channel\/collectiondetail\?sid=(\d+)/i)
-    if (collection) return { kind: 'collection', mid: collection[1], seasonId: collection[2] }
-    const series = `${host}${url.pathname}${url.search}`.match(/space\.bilibili\.com\/(\d+)\/channel\/seriesdetail\?sid=(\d+)/i)
-    if (series) return { kind: 'series', mid: series[1], seriesId: series[2] }
-    const listWithSid = `${host}${url.pathname}${url.search}`.match(/(?:space\.|www\.)?bilibili\.com\/(?:\d+\/)?lists(?:\/(\d+))?\?sid=(\d+)/i)
-    if (listWithSid) return { kind: 'collection', mid: listWithSid[1] || '', seasonId: listWithSid[2] }
-    const listPath = `${host}${url.pathname}`.match(/bilibili\.com\/list\/([A-Za-z0-9_]+)/i)
-    if (listPath) return { kind: 'mediaList', rawUrl: url.href, upId: listPath[1] }
+    const collection = parseSpaceChannelUrl(host, url.pathname, url.searchParams, 'collectiondetail')
+    if (collection) return { kind: 'collection', mid: collection.mid, seasonId: collection.sid }
+    const series = parseSpaceChannelUrl(host, url.pathname, url.searchParams, 'seriesdetail')
+    if (series) return { kind: 'series', mid: series.mid, seriesId: series.sid }
+    const spaceList = parseSpaceListsUrl(host, url.pathname, url.searchParams)
+    if (spaceList) return { kind: 'collection', mid: spaceList.mid, seasonId: spaceList.sid }
+    const webList = parseWebListUrl(host, url.pathname, url.searchParams)
+    if (webList?.sid) return { kind: 'collection', mid: webList.upId, seasonId: webList.sid }
+    if (webList) return { kind: 'mediaList', rawUrl: url.href, upId: webList.upId }
     const ep = withSearch.match(epPattern)?.[1]
     if (ep) return { kind: 'bangumi', idKind: 'ep', id: ep }
     const ss = withSearch.match(ssPattern)?.[1]
@@ -162,12 +164,12 @@ function parseBiliIdentifier(input: string): ParsedBiliInput | undefined {
   return undefined
 }
 
-async function resolveB23IfNeeded(rawUrl: string): Promise<string> {
+async function resolveB23IfNeeded(rawUrl: string, ctx: ResolveContext): Promise<string> {
   const url = new URL(rawUrl)
   if (url.hostname.toLowerCase() !== 'b23.tv') return rawUrl
   let current = rawUrl
   for (let i = 0; i < 5; i++) {
-    const response = await fetchWithTimeout(current, { redirect: 'manual', headers: biliPageHeaders() })
+    const response = await fetchWithTimeout(current, { redirect: 'manual', headers: biliPageHeaders() }, ctx.proxy)
     await response.body?.cancel().catch(() => undefined)
     const location = response.headers.get('location')
     if (location && response.status >= 300 && response.status < 400) {
@@ -183,7 +185,42 @@ async function resolveB23IfNeeded(rawUrl: string): Promise<string> {
 function normalizeBiliUrl(rawUrl: string): string {
   const festival = rawUrl.match(/bilibili\.com\/festival\/.*?[?&]bvid=([A-Za-z0-9]+)/i)?.[1]
   if (festival) return `https://www.bilibili.com/video/${festival}`
+  try {
+    const url = new URL(rawUrl)
+    if (url.hostname.toLowerCase() === 'm.bilibili.com') {
+      const space = url.pathname.match(/^\/space\/(\d+)(\/.*)?$/i)
+      if (space) {
+        const normalized = new URL(`https://space.bilibili.com/${space[1]}${space[2] ?? ''}`)
+        normalized.search = url.search
+        return normalized.href
+      }
+    }
+  } catch {
+    // Keep the original string if it is not a URL.
+  }
   return rawUrl
+}
+
+function parseSpaceChannelUrl(host: string, pathname: string, searchParams: URLSearchParams, detailKind: 'collectiondetail' | 'seriesdetail'): { mid: string; sid: string } | undefined {
+  if (host !== 'space.bilibili.com') return undefined
+  const match = pathname.match(new RegExp(`^/(\\d+)/channel/${detailKind}/?$`, 'i'))
+  const sid = searchParams.get('sid') ?? undefined
+  return match?.[1] && sid ? { mid: match[1], sid } : undefined
+}
+
+function parseSpaceListsUrl(host: string, pathname: string, searchParams: URLSearchParams): { mid: string; sid: string } | undefined {
+  if (host !== 'space.bilibili.com') return undefined
+  const match = pathname.match(/^\/(\d+)\/lists(?:\/(\d+))?\/?$/i)
+  if (!match) return undefined
+  const sid = match[2] ?? searchParams.get('sid') ?? undefined
+  return sid ? { mid: match[1], sid } : undefined
+}
+
+function parseWebListUrl(host: string, pathname: string, searchParams: URLSearchParams): { upId: string; sid?: string } | undefined {
+  if (host !== 'www.bilibili.com' && host !== 'bilibili.com') return undefined
+  const match = pathname.match(/^\/list\/([A-Za-z0-9_]+)\/?$/i)
+  if (!match) return undefined
+  return { upId: match[1], sid: searchParams.get('sid') ?? undefined }
 }
 
 async function resolveOrdinaryVideo(parsed: Extract<ParsedBiliInput, { kind: 'video' }>, ctx: ResolveContext): Promise<MediaInfo> {
@@ -329,7 +366,7 @@ async function fetchSeriesBvids(mid: string, seriesId: string, ctx: ResolveConte
 }
 
 async function fetchMediaListBvids(rawUrl: string, upId: string, ctx: ResolveContext): Promise<{ title: string; bvids: string[] }> {
-  const html = await fetchWithTimeout(rawUrl, { headers: await biliApiHeaders(ctx, rawUrl) }).then((resp) => resp.text()).catch(() => '')
+  const html = await fetchWithTimeout(rawUrl, { headers: await biliApiHeaders(ctx, rawUrl) }, ctx.proxy).then((resp) => resp.text()).catch(() => '')
   const redirected = html.match(/space\.bilibili\.com\/(\d+)\/channel\/(collection|series)detail\?sid=(\d+)/i)
   if (redirected?.[2] === 'collection') return fetchCollectionBvids(redirected[1], redirected[3], ctx)
   if (redirected?.[2] === 'series') return fetchSeriesBvids(redirected[1], redirected[3], ctx)
@@ -438,7 +475,7 @@ async function resolveGongfang(parsed: Extract<ParsedBiliInput, { kind: 'gongfan
 
 async function fetchGongfangTitle(orderId: string, ctx: ResolveContext): Promise<string> {
   const url = `https://mall.bilibili.com/mall-c/order/detail?orderId=${encodeURIComponent(orderId)}`
-  const html = await fetchWithTimeout(url, { headers: await biliApiHeaders(ctx, url) }).then((resp) => resp.text())
+  const html = await fetchWithTimeout(url, { headers: await biliApiHeaders(ctx, url) }, ctx.proxy).then((resp) => resp.text())
   const raw = html.match(/"itemsName"\s*:\s*"((?:\\.|[^"\\])*)"/)?.[1]
   return raw ? JSON.parse(`"${raw}"`) : `gongfang_${orderId}`
 }
@@ -456,7 +493,7 @@ async function fetchGongfangDownloadUrl(orderId: string, shipOrderDetailsId: str
 }
 
 async function postJson<T>(url: string, body: unknown, ctx: ResolveContext): Promise<T> {
-  const response = await fetchWithTimeout(url, { method: 'POST', headers: { ...(await biliApiHeaders(ctx, url)), 'Content-Type': 'application/json;charset=utf-8' }, body: JSON.stringify(body) })
+  const response = await fetchWithTimeout(url, { method: 'POST', headers: { ...(await biliApiHeaders(ctx, url)), 'Content-Type': 'application/json;charset=utf-8' }, body: JSON.stringify(body) }, ctx.proxy)
   if (!response.ok) throw new Error(`bilibili API HTTP ${response.status}`)
   return (await response.json()) as T
 }
@@ -625,7 +662,7 @@ function hasBiliDrm(data: BiliPlayData): boolean {
 }
 
 async function fetchJson<T>(url: string, ctx: ResolveContext): Promise<T> {
-  const response = await fetchWithTimeout(url, { headers: await biliApiHeaders(ctx, url) })
+  const response = await fetchWithTimeout(url, { headers: await biliApiHeaders(ctx, url) }, ctx.proxy)
   if (!response.ok) throw new Error(`bilibili API HTTP ${response.status}`)
   return (await response.json()) as T
 }
@@ -648,17 +685,23 @@ function biliDownloadHeaders(): Record<string, string> {
   return { 'User-Agent': defaultUserAgent, Referer: defaultReferer }
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, proxy?: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs)
+  const requestInit = withProxy({ ...init, signal: controller.signal }, proxy)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, requestInit)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') throw new Error(`bilibili request timed out after ${requestTimeoutMs}ms`)
     throw err
   } finally {
     clearTimeout(timer)
   }
+}
+
+function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
+  const trimmed = proxy?.trim()
+  return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
 function pickStream(streams: MediaStream[], quality = 'best'): BiliStream {

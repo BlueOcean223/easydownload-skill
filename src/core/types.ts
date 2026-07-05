@@ -47,6 +47,7 @@ export const DownloadPlanSchema = z.object({
   chunkConcurrency: z.number().int().positive().default(4),
   multipartThresholdBytes: z.number().int().nonnegative().default(32 * 1024 * 1024),
   timeoutMs: z.number().int().positive().default(30_000),
+  proxy: z.string().min(1).optional(),
   ffmpeg: z.string().min(1).default('ffmpeg'),
   overwrite: z.boolean().default(false),
   noOverwrite: z.boolean().default(false),

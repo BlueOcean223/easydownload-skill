@@ -346,7 +346,7 @@ class DownloadExecutor {
   }
 
   private fetch(url: string, init: RequestInit): Promise<Response> {
-    return fetchWithTimeout(url, init, this.plan.timeoutMs)
+    return fetchWithTimeout(url, init, this.plan.timeoutMs, this.plan.proxy)
   }
 }
 
@@ -460,17 +460,23 @@ async function finalizePart(dest: string): Promise<void> {
   await rename(partPath, dest)
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, proxy?: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const requestInit = withProxy({ ...init, signal: controller.signal }, proxy)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, requestInit)
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') throw new Error(`request timed out after ${timeoutMs}ms`)
     throw err
   } finally {
     clearTimeout(timer)
   }
+}
+
+function withProxy(init: RequestInit, proxy: string | undefined): RequestInit {
+  const trimmed = proxy?.trim()
+  return trimmed ? ({ ...init, proxy: trimmed } as RequestInit) : init
 }
 
 async function runFfmpegMux(ffmpeg: string, videoPath: string, audioPath: string, outputPath: string): Promise<void> {
