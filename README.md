@@ -12,16 +12,67 @@
 - **B站登录**：二维码登录，用于高清、大会员或付费内容——全程不需要你手填 SESSDATA。
 - **机器可读输出**：`--json` / `--json-progress`，专为 agent 解析设计；断点续传、多线程分块、失败自动汇总。
 
-## 安装
+## 安装 / 分发包
 
-需要 [Bun](https://bun.sh)。B站 DASH 视频合并还需要本机有 [`ffmpeg`](https://ffmpeg.org)。
+面向 agent 分发的 zip 只包含三类内容：
+
+```text
+bin/        # 各平台预编译 easydl 二进制
+SKILL.md    # 给 agent 看的 skill 手册
+README.md   # 本说明
+```
+
+预编译二进制已经内置 Bun runtime 和下载器代码，**使用者不需要安装 Bun，也不需要自行打包**。选择自己的平台二进制，放到 PATH 里并命名为 `easydl` 即可：
+
+```text
+bin/easydl-darwin-arm64       # macOS Apple Silicon
+bin/easydl-linux-x64          # Linux x64
+bin/easydl-linux-arm64        # Linux arm64/aarch64
+bin/easydl-windows-x64.exe    # Windows x64
+```
+
+Linux / macOS 示例：
+
+```bash
+chmod +x bin/easydl-darwin-arm64
+cp bin/easydl-darwin-arm64 ~/.local/bin/easydl
+easydl --help
+```
+
+Windows PowerShell 示例：
+
+```powershell
+.\bin\easydl-windows-x64.exe --help
+```
+
+### ffmpeg 是否包含？
+
+**不包含。** `ffmpeg` 体积大、平台差异多，当前分发包不内置。只有 B站 DASH 音视频合并需要它，通常包括 B站高画质、1080P+、4K、HDR、番剧 / PGC 等资源。
+
+请使用者自行安装 ffmpeg，并确保它在 PATH 上，或显式配置：
+
+```bash
+easydl config set ffmpeg /path/to/ffmpeg
+```
+
+常见安装方式：
+
+```bash
+brew install ffmpeg             # macOS
+sudo apt-get install ffmpeg     # Debian / Ubuntu
+winget install Gyan.FFmpeg      # Windows
+```
+
+### 从源码开发
+
+源码仓库才需要 Bun：
 
 ```bash
 bun install
-bun run compile      # 产出单个可执行文件 ./bin/easydl
+bun run typecheck
+bun run test
+bun run compile      # 产出当前平台 ./bin/easydl
 ```
-
-`./bin/easydl` 就是最终交付物，可以拷到任意机器直接跑（无需 Bun 运行时）。想直接用源码跑也行：`bun run src/cli.ts <命令>`。
 
 ## 快速上手
 
@@ -46,7 +97,7 @@ bun run compile      # 产出单个可执行文件 ./bin/easydl
 
 ### 接入 OpenClaw
 
-1. **准备可执行文件**：`bun run compile` 产出 `bin/easydl`，放到 OpenClaw 容器 / 会话能执行到的路径（或加进 PATH）。运行时还需要 `ffmpeg`（B站 DASH 合并用）。
+1. **准备可执行文件**：从 `bin/` 里选择当前平台二进制，放到 OpenClaw 容器 / 会话能执行到的路径（或加进 PATH），并命名为 `easydl`。运行时还需要 `ffmpeg`（B站 DASH 合并用，不随包内置）。
 2. **喂入 SKILL.md**：把 `SKILL.md` 的内容作为这项下载能力的工具说明 / 系统提示交给 agent。它写成了工作流文档——命令用法、`--json` / `--json-progress` 输出契约、安全规则——不是单纯的命令列表。
 3. **让 agent 按工作流跑**：先 `info` / `formats` 看清楚是什么、有哪些清晰度，再 `download --json-progress`，最后解析 `done` 事件把产物路径回给用户。
 4. **指定安全工作目录**（下一节）：让登录态和配置落到 OpenClaw 自己的目录，而不是散落在系统用户目录。
