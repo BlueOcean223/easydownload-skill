@@ -1,8 +1,11 @@
+import { loadCookieHeader } from '../../core/cookies.js'
 import type { DownloadEntry, DownloadOptions, DownloadPlan, MediaImage, MediaInfo, MediaStream, Platform, ResolveContext } from '../../core/types.js'
 
 const defaultUserAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
+const defaultDesktopUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 const defaultReferer = 'https://www.douyin.com/'
 const shareBase = 'https://www.iesdouyin.com/share'
+const webDetailUrl = 'https://www.douyin.com/aweme/v1/web/aweme/detail/'
 const playBaseUrl = 'https://aweme.snssdk.com/aweme/v1/play/'
 const ttwidRegisterUrl = 'https://ttwid.bytedance.com/ttwid/union/register/'
 const requestTimeoutMs = 30_000
@@ -164,12 +167,26 @@ async function fetchShareInfo(awemeId: string, ctx: ResolveContext): Promise<Med
       const item = await fetchSharePageItem(`${shareBase}/${kind}/${awemeId}/?app=aweme`, ctx)
       const info = await buildMediaInfo(item, awemeId, ctx)
       if (isUsable(info)) return info
-      firstErr ??= new Error('douyin share item has metadata but no playable video URL; play endpoint returned no usable video stream, so the item may be removed, restricted, or app-only')
+      firstErr ??= noPlayableVideoError()
     } catch (err) {
       firstErr ??= err
     }
   }
+
+  try {
+    const item = await fetchWebDetailItem(awemeId, ctx)
+    const info = await buildMediaInfo(item, awemeId, ctx)
+    if (isUsable(info)) return info
+    firstErr ??= noPlayableVideoError()
+  } catch (err) {
+    firstErr ??= err
+  }
+
   throw new Error(`douyin item fetch failed: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}`)
+}
+
+function noPlayableVideoError(): Error {
+  return new Error('douyin share item has metadata but no playable video URL; play endpoint returned no usable video stream, so the item may be removed, restricted, app-only, or require browser-generated web detail cookies')
 }
 
 async function fetchSharePageItem(url: string, ctx: ResolveContext): Promise<Record<string, unknown>> {
@@ -200,6 +217,31 @@ async function fetchSharePageItemOnce(url: string, ctx: ResolveContext, cookieHe
     if (Object.keys(item).length > 0) return item
   }
   throw new Error('douyin item not found in router data')
+}
+
+async function fetchWebDetailItem(awemeId: string, ctx: ResolveContext): Promise<Record<string, unknown>> {
+  const url = new URL(webDetailUrl)
+  url.searchParams.set('aweme_id', awemeId)
+  url.searchParams.set('device_platform', 'webapp')
+  url.searchParams.set('aid', '6383')
+  url.searchParams.set('channel', 'channel_pc_web')
+
+  const cookieHeader = await loadCookieHeader(ctx.cookiesPath, 'https://www.douyin.com/').catch(() => undefined)
+  const response = await fetchWithTimeout(url.href, { headers: douyinWebDetailHeaders(awemeId, cookieHeader) }, ctx.proxy)
+  if (response.status === 403 || response.status === 429) throw new Error('douyin web detail request rate limited')
+  if (!response.ok) throw new Error(`douyin web detail HTTP ${response.status}`)
+
+  const text = await response.text()
+  if (!text.trim()) throw new Error('douyin web detail empty response')
+  const payload = JSON.parse(text) as Record<string, unknown>
+  const statusCode = getNumber(payload, 'status_code')
+  if (statusCode !== 0) throw new Error(`douyin web detail status ${statusCode}: ${getString(payload, 'status_msg') || 'unknown error'}`)
+  const item = getRecord(payload.aweme_detail)
+  if (Object.keys(item).length > 0) return item
+  const itemList = Array.isArray(payload.item_list) ? payload.item_list : []
+  const first = getRecord(itemList[0])
+  if (Object.keys(first).length > 0) return first
+  throw new Error('douyin web detail item not found')
 }
 
 function shouldRetrySharePageWithTtwid(err: unknown): boolean {
@@ -274,7 +316,8 @@ function parseStreams(video: Record<string, unknown>): ParsedStream[] {
   for (const value of bitRates) {
     const br = getRecord(value)
     const brPlay = getRecord(br.play_addr)
-    const url = pickNoWatermarkUrl(getArray(brPlay.url_list))
+    const urls = pickDownloadUrls(getArray(brPlay.url_list))
+    const url = urls[0]
     if (!url) continue
     const width = getNumber(brPlay, 'width') || fallbackWidth
     const height = getNumber(brPlay, 'height') || fallbackHeight
@@ -285,12 +328,34 @@ function parseStreams(video: Record<string, unknown>): ParsedStream[] {
       qualityName: quality,
       width: width || undefined,
       height: height || undefined,
-      size: getNumber(br, 'size') || undefined,
+      size: getNumber(br, 'size') || getNumber(brPlay, 'data_size') || undefined,
       url,
-      backupUrls: [],
+      backupUrls: urls.slice(1),
       headers: douyinDownloadHeaders(),
       bitrate: getNumber(br, 'bit_rate'),
     })
+  }
+
+  if (streams.length === 0) {
+    const playAddr = getRecord(video.play_addr)
+    const urls = directVideoUrls(getArray(playAddr.url_list))
+    const url = urls[0]
+    if (url) {
+      const width = getNumber(playAddr, 'width') || fallbackWidth
+      const height = getNumber(playAddr, 'height') || fallbackHeight
+      const quality = resolutionKey(width, height) || 'source'
+      streams.push({
+        id: quality,
+        quality,
+        qualityName: quality,
+        width: width || undefined,
+        height: height || undefined,
+        size: getNumber(playAddr, 'data_size') || undefined,
+        url,
+        backupUrls: urls.slice(1),
+        headers: douyinDownloadHeaders(),
+      })
+    }
   }
 
   return sortStreams(streams)
@@ -423,18 +488,51 @@ function douyinPageHeaders(cookieHeader?: string): Record<string, string> {
   }
 }
 
+function douyinWebDetailHeaders(awemeId: string, cookieHeader?: string): Record<string, string> {
+  return {
+    'User-Agent': defaultDesktopUserAgent,
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    Referer: `https://www.douyin.com/video/${awemeId}`,
+    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+  }
+}
+
 function douyinDownloadHeaders(): Record<string, string> {
-  return { 'User-Agent': defaultUserAgent, Referer: defaultReferer }
+  return { 'User-Agent': defaultDesktopUserAgent, Referer: defaultReferer }
 }
 
 function isUsable(info: MediaInfo): boolean {
   return info.type === 'video' ? Boolean(info.streams?.length) : info.type === 'album' ? Boolean(info.images?.length) : false
 }
 
+function pickDownloadUrls(urls: string[]): string[] {
+  const direct = directVideoUrls(urls)
+  if (direct.length > 0) return direct
+  return noWatermarkUrls(urls)
+}
+
+function directVideoUrls(urls: string[]): string[] {
+  return uniqueStrings(urls).filter(isDirectVideoUrl)
+}
+
+function noWatermarkUrls(urls: string[]): string[] {
+  return uniqueStrings(urls).map((url) => url.replaceAll('playwm', 'play'))
+}
+
 function pickNoWatermarkUrl(urls: string[]): string | undefined {
-  const cleaned = uniqueStrings(urls)
-  const selected = cleaned.find((url) => !url.includes('playwm')) ?? cleaned[0]
-  return selected?.replaceAll('playwm', 'play')
+  return noWatermarkUrls(urls)[0]
+}
+
+function isDirectVideoUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    if (host === 'aweme.snssdk.com' || host === 'www.douyin.com') return false
+    return host.includes('douyinvod.com') || parsed.searchParams.get('mime_type') === 'video_mp4' || /\/video\//.test(parsed.pathname)
+  } catch {
+    return false
+  }
 }
 
 function firstUrl(value: unknown[]): string | undefined {

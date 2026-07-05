@@ -117,11 +117,36 @@ test('retries share page with ttwid when router data is hidden', async () => {
   expect(info.streams?.[0]).toMatchObject({ id: '720p', size: 222 })
 })
 
+test('uses web detail CDN URLs when share play endpoint is unavailable', async () => {
+  mockFetch(async (url, init) => {
+    if (url === `https://www.iesdouyin.com/share/video/${awemeId}/?app=aweme`) return htmlResponse(routerDataHtml(videoItemWithoutBitrate()))
+    if (url === `https://www.iesdouyin.com/share/note/${awemeId}/?app=aweme`) return new Response('not found', { status: 404 })
+    if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) return new Response('', { status: 404 })
+    if (url.startsWith('https://www.douyin.com/aweme/v1/web/aweme/detail/')) {
+      const parsed = new URL(url)
+      expect(parsed.searchParams.get('aweme_id')).toBe(awemeId)
+      expect(parsed.searchParams.get('channel')).toBe('channel_pc_web')
+      const headers = init?.headers as Record<string, string>
+      expect(headers.Referer).toBe(`https://www.douyin.com/video/${awemeId}`)
+      return jsonResponse({ status_code: 0, aweme_detail: webDetailVideoItem() })
+    }
+    throw new Error(`unexpected fetch ${url}`)
+  })
+
+  const info = await douyinPlatform.resolve(`https://www.douyin.com/video/${awemeId}`, { configDir: '/tmp/easydl-test' })
+  expect(info.streams?.[0]).toMatchObject({ id: '720p', size: 9544587, url: 'https://v26-web.douyinvod.com/video-720.mp4?mime_type=video_mp4' })
+  expect(info.streams?.[0].backupUrls).toEqual(['https://v3-web.douyinvod.com/video-720.mp4?mime_type=video_mp4'])
+
+  const plan = await douyinPlatform.createDownloadPlan(info, { outputDir: '/tmp/out' })
+  expect(plan.items[0]).toMatchObject({ kind: 'file', url: 'https://v26-web.douyinvod.com/video-720.mp4?mime_type=video_mp4' })
+})
+
 test('does not expose unplayable play_addr URLs when ratio probing fails', async () => {
   mockFetch(async (url) => {
     if (url === `https://www.iesdouyin.com/share/video/${awemeId}/?app=aweme`) return htmlResponse(routerDataHtml(videoItemWithoutBitrate()))
     if (url === `https://www.iesdouyin.com/share/note/${awemeId}/?app=aweme`) return new Response('not found', { status: 404 })
     if (url.startsWith('https://aweme.snssdk.com/aweme/v1/play/')) return new Response('', { status: 404 })
+    if (url.startsWith('https://www.douyin.com/aweme/v1/web/aweme/detail/')) return new Response('', { status: 200, headers: { 'content-type': 'application/json' } })
     throw new Error(`unexpected fetch ${url}`)
   })
 
@@ -177,6 +202,36 @@ function videoItemWithoutBitrate1080() {
   }
 }
 
+function webDetailVideoItem() {
+  return {
+    aweme_id: awemeId,
+    desc: 'Web detail 视频',
+    aweme_type: 0,
+    author: { nickname: '作者' },
+    video: {
+      cover: { url_list: ['https://image.example.com/cover.jpg'] },
+      width: 1280,
+      height: 720,
+      bit_rate: [
+        {
+          gear_name: 'normal_720_0',
+          bit_rate: 2701266,
+          play_addr: {
+            width: 1280,
+            height: 720,
+            data_size: 9544587,
+            url_list: [
+              'https://v26-web.douyinvod.com/video-720.mp4?mime_type=video_mp4',
+              'https://v3-web.douyinvod.com/video-720.mp4?mime_type=video_mp4',
+              'https://www.douyin.com/aweme/v1/play/?video_id=video-uri&ratio=720p',
+            ],
+          },
+        },
+      ],
+    },
+  }
+}
+
 function albumItem() {
   return {
     aweme_id: awemeId,
@@ -209,4 +264,8 @@ function mockFetch(fn: (url: string, init?: RequestInit) => Promise<Response>): 
 
 function htmlResponse(value: string): Response {
   return new Response(value, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } })
 }
