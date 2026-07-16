@@ -14,6 +14,17 @@
 
 ## 安装 / 分发包
 
+推荐从 [GitHub Releases](../../releases) 下载预编译包，无需安装 Bun、无需自行打包。
+
+打 tag 发布即可自动构建（见 `.github/workflows/release.yml`）：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+也可在 Actions 里手动跑 **Release** workflow（可填 tag）。
+
 面向 agent 分发的 zip 只包含三类内容：
 
 ```text
@@ -26,6 +37,7 @@ README.md   # 本说明
 
 ```text
 bin/easydl-darwin-arm64       # macOS Apple Silicon
+bin/easydl-darwin-x64         # macOS Intel
 bin/easydl-linux-x64          # Linux x64
 bin/easydl-linux-arm64        # Linux arm64/aarch64
 bin/easydl-windows-x64.exe    # Windows x64
@@ -72,6 +84,7 @@ bun install
 bun run typecheck
 bun run test
 bun run compile      # 产出当前平台 ./bin/easydl
+bun run compile:all  # 跨平台产出 linux / darwin / windows 二进制到 ./bin/
 ```
 
 ## 快速上手
