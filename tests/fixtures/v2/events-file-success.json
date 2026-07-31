@@ -1,0 +1,44 @@
+[
+  {
+    "schemaVersion": 2,
+    "type": "start",
+    "taskId": "3xvideo123",
+    "output": "Best Goal.mp4"
+  },
+  {
+    "schemaVersion": 2,
+    "type": "reset",
+    "taskId": "3xvideo123",
+    "path": "/downloads/Best Goal.mp4.part",
+    "reason": {
+      "code": "resume.identity_mismatch",
+      "message": "partial download does not match the current remote object"
+    }
+  },
+  {
+    "schemaVersion": 2,
+    "type": "progress",
+    "taskId": "3xvideo123",
+    "downloaded": 5,
+    "total": 5
+  },
+  {
+    "schemaVersion": 2,
+    "type": "artifact",
+    "taskId": "3xvideo123",
+    "path": "/downloads/Best Goal.mp4"
+  },
+  {
+    "schemaVersion": 2,
+    "type": "done",
+    "success": true,
+    "artifacts": [
+      {
+        "taskId": "3xvideo123",
+        "path": "/downloads/Best Goal.mp4"
+      }
+    ],
+    "failures": [],
+    "skipped": []
+  }
+]

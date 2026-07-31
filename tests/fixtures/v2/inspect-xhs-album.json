@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "platform": "xhs",
+  "media": {
+    "id": "64f123456789abcdef123456",
+    "kind": "album",
+    "title": "图文标题",
+    "author": "作者"
+  },
+  "choices": {
+    "qualities": [],
+    "parts": [],
+    "images": [
+      {
+        "id": "image-1",
+        "index": 1,
+        "width": 1080,
+        "height": 1440
+      },
+      {
+        "id": "image-2",
+        "index": 2,
+        "width": 1080,
+        "height": 1440
+      }
+    ]
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}

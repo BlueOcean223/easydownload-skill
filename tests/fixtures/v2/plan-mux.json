@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "createdAt": "2026-07-30T00:00:00Z",
+  "expiresAt": "2026-07-30T00:10:00Z",
+  "source": {
+    "platform": "bilibili",
+    "mediaId": "BV1fixture"
+  },
+  "tasks": [
+    {
+      "kind": "mux",
+      "id": "BV1fixture:p1",
+      "tracks": [
+        {
+          "id": "video",
+          "kind": "video",
+          "sources": [
+            {
+              "url": "https://upos-sz-mirrorcos.bilivideo.com/video.m4s",
+              "headers": {
+                "Referer": "https://www.bilibili.com/"
+              },
+              "authRef": "bilibili:default"
+            }
+          ]
+        },
+        {
+          "id": "audio",
+          "kind": "audio",
+          "sources": [
+            {
+              "url": "https://upos-sz-mirrorcos.bilivideo.com/audio.m4s",
+              "headers": {
+                "Referer": "https://www.bilibili.com/"
+              },
+              "authRef": "bilibili:default"
+            },
+            {
+              "url": "https://upos-sz-mirrorali.bilivideo.com/audio.m4s",
+              "authRef": "bilibili:default"
+            }
+          ]
+        }
+      ],
+      "format": "mp4",
+      "output": {
+        "relativePath": "Fixture Video.mp4"
+      }
+    }
+  ]
+}

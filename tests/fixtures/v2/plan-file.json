@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "createdAt": "2026-07-30T00:00:00Z",
+  "expiresAt": "2026-07-30T00:10:00Z",
+  "source": {
+    "platform": "kuaishou",
+    "mediaId": "3xvideo123"
+  },
+  "tasks": [
+    {
+      "kind": "file",
+      "id": "3xvideo123",
+      "sources": [
+        {
+          "url": "https://cdn.example.com/1080.mp4",
+          "headers": {
+            "Referer": "https://v.chenzhongtech.com/",
+            "User-Agent": "fixture-agent"
+          }
+        },
+        {
+          "url": "https://backup.example.com/1080.mp4"
+        }
+      ],
+      "output": {
+        "relativePath": "Best Goal.mp4"
+      }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 2,
+  "platform": "douyin",
+  "media": {
+    "id": "7312345678901234561",
+    "kind": "video",
+    "title": "视频标题",
+    "author": "作者",
+    "cover": "https://p3-sign.douyinpic.com/cover.jpg"
+  },
+  "choices": {
+    "qualities": [
+      {
+        "id": "1080p",
+        "label": "1080p",
+        "recommended": true,
+        "width": 1080,
+        "height": 1920
+      },
+      {
+        "id": "720p",
+        "label": "720p",
+        "recommended": false,
+        "width": 720,
+        "height": 1280
+      }
+    ],
+    "parts": [],
+    "images": []
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "platform": "douyin",
+  "media": {
+    "id": "7312345678901234562",
+    "kind": "album",
+    "title": "图集标题",
+    "author": "作者"
+  },
+  "choices": {
+    "qualities": [],
+    "parts": [],
+    "images": [
+      {
+        "id": "image-1",
+        "index": 1,
+        "width": 1080,
+        "height": 1440
+      },
+      {
+        "id": "image-2",
+        "index": 2,
+        "width": 1080,
+        "height": 1440
+      }
+    ]
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}

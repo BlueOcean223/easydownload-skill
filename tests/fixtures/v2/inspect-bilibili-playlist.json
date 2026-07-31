@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 2,
+  "platform": "bilibili",
+  "media": {
+    "id": "BV1xx411c7mD",
+    "kind": "playlist",
+    "title": "普通视频",
+    "author": "UP主",
+    "cover": "https://i.example.com/cover.jpg"
+  },
+  "choices": {
+    "qualities": [
+      {
+        "id": "80",
+        "label": "1080P",
+        "recommended": true,
+        "width": 1920,
+        "height": 1080,
+        "size": 128900
+      },
+      {
+        "id": "64",
+        "label": "720P",
+        "recommended": false,
+        "width": 1280,
+        "height": 720,
+        "size": 128500
+      }
+    ],
+    "parts": [
+      {
+        "id": "part-1",
+        "index": 1,
+        "title": "第一P"
+      },
+      {
+        "id": "part-2",
+        "index": 2,
+        "title": "第二P"
+      }
+    ],
+    "images": []
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": true
+  }
+}

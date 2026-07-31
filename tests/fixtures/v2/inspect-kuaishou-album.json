@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "platform": "kuaishou",
+  "media": {
+    "id": "3xatlas123",
+    "kind": "album",
+    "title": "Album Title",
+    "author": "作者",
+    "cover": "https://p23.a.yximgs.com/cover.jpg"
+  },
+  "choices": {
+    "qualities": [],
+    "parts": [],
+    "images": [
+      {
+        "id": "image-1",
+        "index": 1,
+        "width": 1080,
+        "height": 1184
+      },
+      {
+        "id": "image-2",
+        "index": 2,
+        "width": 1080,
+        "height": 1164
+      }
+    ]
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}
