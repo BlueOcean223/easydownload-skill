@@ -4,6 +4,7 @@
 /bin/
 /build/
 /dist/
+/target/
 *.exe
 *.exe~
 *.dll
@@ -23,13 +24,8 @@ vendor/
 # go.work.sum
 
 # =========================
-# Node / Frontend
+# Build caches
 # =========================
-node_modules/
-dist/
-*.tsbuildinfo
-.next/
-.nuxt/
 .cache/
 
 # =========================
