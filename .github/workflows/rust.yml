@@ -11,6 +11,7 @@ on:
       - "rust-toolchain.toml"
       - "src/**"
       - "scripts/**"
+      - "docs/**"
       - "tests/**"
       - "README.md"
       - "SKILL.md"
