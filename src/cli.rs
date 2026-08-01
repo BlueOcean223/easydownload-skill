@@ -25,7 +25,7 @@ use crate::{
 #[command(
     name = "easydl",
     version,
-    about = "Agent-friendly media downloader CLI (Rust v0.2 development build)",
+    about = "Agent-friendly media downloader CLI",
     long_about = None
 )]
 pub struct Cli {

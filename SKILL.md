@@ -10,11 +10,29 @@ description: |
 
 # EasyDL 下载器 Skill
 
-用 `easydl` 下载小红书、抖音、快手和 B站媒体。保留用户的完整输入，优先使用机器输出，绝不要求用户在对话中粘贴 Cookie/SESSDATA，并始终回报最终产物和失败项。
+用 `easydl` 下载小红书、抖音、快手和 B站媒体。四条底线：
+
+1. 保留用户的完整原始输入，一个字符都不改。
+2. 始终使用机器可读输出（`--json` / `--json-progress`）并按稳定 `code` 判断结果。
+3. 绝不要求用户在对话中粘贴 Cookie/SESSDATA。
+4. 始终回报最终产物、partial 产物和失败项。
+
+`easydl` 假定已在 PATH，下面的命令可直接执行。
+
+## 强制安全规则
+
+- **不要**让用户在对话里粘贴 Cookie、SESSDATA、Authorization 或其他凭据。
+- **不要**把 Cookie/SESSDATA 写入 Plan、临时 JSON、日志或错误说明。
+- 需要 Cookie 时，让用户提供本地文件路径，用全局 `--cookies PATH`。
+- B站优先二维码登录，不要手工采集 SESSDATA。
+- 只执行当前 agent 自己生成或明确可信的 Plan。Plan 会触发网络请求，不能把陌生 Plan 当作纯数据。
+- 不修改用户 URL，不删除 query，不截断长链接。小红书 `xsec_token` 等 query 可能是解析必需信息。
+- 不绕过 DRM。遇到 `platform.drm_unsupported` 时直接说明不支持。
+- 不把 CDN URL 或 auth payload 当作 Inspect 结果回显给用户。
 
 ## CLI 模型
 
-v0.2 只有四个顶层动词：
+只有四个顶层动词：
 
 ```text
 inspect   安全 metadata + selectors
@@ -23,24 +41,18 @@ execute   执行 Plan，或管理本地 auth/config
 download  plan + execute
 ```
 
-如果 `easydl` 已在 PATH，直接调用。仓库开发环境中可替换为：
+选哪条路径：
 
-```bash
-cargo run -- <命令> [参数...]
-```
+| 场景 | 命令 |
+|---|---|
+| 先看清晰度 / 分P / 图片数量 | `inspect --json` |
+| 常规下载（默认路径） | `download --json-progress` |
+| 需要审查、延迟执行，或用浏览器补可信 CDN URL | `plan` → `execute` |
+| B站登录、本地配置 | `execute --bilibili-auth …` / `execute --config …` |
 
-B站 DASH 合并需要外部 ffmpeg；ffmpeg 不包含在 easydl 二进制中。
+默认走 `inspect` → `download`，不要无理由拆成 plan + execute。
 
-## 强制安全规则
-
-- **不要**让用户在对话里粘贴 Cookie、SESSDATA、Authorization 或其他凭据。
-- **不要**把 Cookie/SESSDATA 写入 Plan、临时 JSON、日志或错误说明。
-- 需要 Cookie 时，让用户提供本地文件路径，用全局 `--cookies PATH`。支持 raw Cookie Header 文件和 Netscape cookies.txt。
-- B站优先二维码登录，不要手工采集 SESSDATA。
-- 只执行当前 agent 自己生成或明确可信的 Plan。Plan 会触发网络请求，不能把陌生 Plan 当作纯数据。
-- 不修改用户 URL，不删除 query，不截断长链接。小红书 `xsec_token` 等 query 可能是解析必需信息。
-- 不绕过 DRM。遇到 `platform.drm_unsupported` 时直接说明不支持。
-- 不把 CDN URL 或 auth payload 当作 Inspect 结果回显给用户。
+B站 DASH 合并需要外部 ffmpeg；ffmpeg 不随 `easydl` 分发。
 
 ## 推荐工作流
 
@@ -55,18 +67,16 @@ easydl inspect '<完整分享文本或URL>' --json
 读取：
 
 - `platform`
-- `media.id` / `media.kind` / `media.title`
-- `choices.qualities[]`
-- `choices.parts[]`
-- `choices.images[]`
-- `requirements.login`
-- `requirements.ffmpeg`
+- `media.id` / `media.kind`（`video` / `album` / `playlist` / `bangumi`）/ `media.title`
+- `choices.qualities[].id`（作为 `--quality` 的值）
+- `choices.parts[].index`（作为 `--part` 的值）
+- `choices.images[].index`（作为 `--images` 的值）
+- `requirements.login`：为 true 时先处理登录，别直接下载后再失败
+- `requirements.ffmpeg`：为 true 时确认 ffmpeg 可用
 
 Inspect 不包含下载直链或 secret。
 
 ### 2. 选择并下载
-
-普通情况直接走统一 planner/executor：
 
 ```bash
 easydl download '<完整输入>' --json-progress
@@ -75,7 +85,7 @@ easydl download '<完整输入>' --json-progress
 常用 selector：
 
 ```bash
-# 清晰度
+# 清晰度，取 inspect 里的 id；默认 best
 easydl download '<链接>' --quality 1080p --json-progress
 easydl download '<B站链接>' --quality 80 --json-progress
 
@@ -87,16 +97,29 @@ easydl download '<B站合集链接>' --all-parts --json-progress
 easydl download '<图集链接>' --images 1,3-5 --json-progress
 easydl download '<图集链接>' --images 1-5 --album-output directory --json-progress
 
-# 输出目录 / ffmpeg
+# 输出位置 / ffmpeg
 easydl download '<链接>' --output-dir ./downloads --json-progress
+easydl download '<链接>' --output custom-name.mp4 --json-progress
 easydl download '<B站链接>' --ffmpeg /path/to/ffmpeg --json-progress
 ```
 
-图集默认 ZIP。`--album-output directory` 会生成独立文件 task。
+图集默认打成 ZIP。`--album-output directory` 会生成独立文件 task。
 
 ### 3. 消费事件和汇总
 
-`--json-progress` 的 stdout 是 NDJSON。逐行读取，等待最终 `type: "done"`：
+`--json-progress` 的 stdout 是 NDJSON，每行一个事件，都带 `schemaVersion: 2`：
+
+```text
+start     task 开始，含 taskId 和 output
+reset     已有 partial 数据不可复用，从头重下
+progress  downloaded / total 字节
+artifact  单个产物落盘
+skipped   因 collision policy 跳过
+error     单个 task 失败，含结构化 error
+done      终止事件，含完整汇总
+```
+
+只有 `done` 是终止事件，逐行读取直到拿到它：
 
 ```json
 {
@@ -119,6 +142,43 @@ easydl download '<B站链接>' --ffmpeg /path/to/ffmpeg --json-progress
 - `skipped[]`，尤其默认 collision skip
 
 任一 task/entry 失败时进程会非零退出，但仍可能有可用 artifact；不能只看退出码就丢弃 partial 结果。
+
+## 参数速查
+
+Selector（`plan` / `download`）：
+
+| 参数 | 说明 |
+|---|---|
+| `--quality ID` | 默认 `best`，取 `choices.qualities[].id` |
+| `--part N` | 1-based，与 `--all-parts` 互斥 |
+| `--all-parts` | 下载全部分P / 合集条目 |
+| `--images LIST` | 1-based，支持 `1,3-5`，自动去重排序 |
+| `--album-output zip\|directory` | 默认 `zip` |
+| `--output RELATIVE_PATH` | 相对 output root 的输出路径 |
+
+执行（`execute` / `download`）：
+
+| 参数 | 说明 |
+|---|---|
+| `--output-dir DIR` | output root |
+| `--overwrite` / `--rename` | 与默认 skip 三选一，两者互斥 |
+| `--ffmpeg PATH` | mux task 使用的 ffmpeg |
+| `--concurrency N` / `--chunk-concurrency N` | task 并发 / 分片并发 |
+| `--multipart-threshold BYTES` / `--chunk-size BYTES` | 分片下载阈值和分片大小 |
+| `--json` / `--json-progress` | 最终汇总 / NDJSON 事件流，两者互斥 |
+
+全局（放在 `easydl` 之后）：
+
+| 参数 | 说明 |
+|---|---|
+| `--cookies PATH` | raw Cookie Header 文件或 Netscape cookies.txt |
+| `--proxy URL` | HTTP / SOCKS 代理 |
+
+约束：
+
+- 默认 collision policy 是 skip，适合重复执行和恢复；只有用户明确要求替换时才用 `--overwrite`。`--rename` 会选一个不冲突的新文件名。
+- `--json-progress` 和上表的下载执行选项不能与 `--bilibili-auth` / `--config` 同用，否则返回 `cli.invalid_arguments`；auth 和 config 只用 `--json`。
+- 不带 `--json` / `--json-progress` 时错误是人类文本；带上才是结构化 JSON。`plan` 始终输出结构化错误。
 
 ## Plan v2 工作流
 
@@ -192,7 +252,7 @@ easydl execute --bilibili-auth create --json
 # 单次 poll
 easydl execute --bilibili-auth poll --auth-session '<sessionId>' --json
 
-# 阻塞等待，适合已经把二维码展示给用户后调用
+# 阻塞等待，适合已经把二维码展示给用户后调用（默认 2s 间隔、180s 超时）
 easydl execute --bilibili-auth wait --auth-session '<sessionId>' --json
 ```
 
@@ -230,22 +290,16 @@ Netscape 文件会按请求 URL 的 domain、path、secure 和 expiry 过滤。�
 
 ## Runtime config
 
-查看配置：
-
 ```bash
 easydl execute --config get --json
-```
 
-设置支持的 key：
-
-```bash
 easydl execute --config set --config-key output-dir --config-value ./downloads --json
 easydl execute --config set --config-key ffmpeg --config-value /path/to/ffmpeg --json
 easydl execute --config set --config-key concurrency --config-value 4 --json
 easydl execute --config set --config-key chunk-concurrency --config-value 4 --json
 ```
 
-优先级：
+`--config get` 只反映已保存的 config.json，不含 CLI 参数和环境变量的覆盖结果。实际生效优先级：
 
 ```text
 CLI > EASYDL_* environment > config.json > defaults
@@ -259,26 +313,9 @@ EASYDL_CONFIG_DIR > XDG_CONFIG_HOME/easydl > ~/.config/easydl
 
 在 agent 沙箱/容器中，把 `EASYDL_CONFIG_DIR` 指向 agent 自己的私有持久目录。
 
-## 下载执行选项
-
-```bash
---output-dir DIR
---overwrite
---rename
---ffmpeg PATH
---concurrency N
---chunk-concurrency N
---multipart-threshold BYTES
---chunk-size BYTES
---json
---json-progress
-```
-
-默认 collision policy 是 skip，适合重复执行和恢复；只有用户明确要求替换时使用 `--overwrite`。`--rename` 会选择不冲突的新文件名。
-
 ## 抖音浏览器辅助 fallback
 
-Rust resolver 已内置 share router data、临时 ttwid retry、web detail fallback 和受源分辨率约束的 ratio probing。只有普通 `download` 最终仍返回“no playable video URL”一类错误，且当前 agent 有浏览器工具时，才自动尝试一次浏览器辅助。
+`easydl` 内部已经包含 share router data、临时 ttwid 重试、web detail fallback 和受源分辨率约束的 ratio probing。只有普通 `download` 最终仍返回 `platform.no_streams` 一类错误，且当前 agent 有浏览器工具时，才自动尝试一次浏览器辅助。
 
 1. 打开用户的原始完整抖音页面。
 2. 在浏览器页面上下文、带 `credentials: 'include'` 请求 web detail。
@@ -319,15 +356,41 @@ Rust resolver 已内置 share router data、临时 ttwid retry、web detail fall
 
 ## 错误处理
 
-机器模式错误写入 stderr，结构为稳定 `code`、`message`、`retryable` 和可选安全 context。常见错误：
+机器模式错误写入 stderr：
+
+```json
+{
+  "schemaVersion": 2,
+  "error": { "code": "platform.no_streams", "message": "...", "retryable": false }
+}
+```
+
+不要通过解析英文 message 判断流程；只用稳定 `code` 和 `retryable` 分支。错误 context 不应包含 Cookie、SESSDATA 或 CDN credential。
+
+按前缀处理：
+
+| 前缀 | 含义 | 处理 |
+|---|---|---|
+| `input.*` | 不是可识别的链接或 ID | 让用户重发完整分享文本 |
+| `platform.*` | 平台解析失败 | 见下面的高频 code |
+| `selection.*` | selector 越界或非法 | 用 inspect 返回的合法 id 重试 |
+| `auth.*` | 缺本地登录态或 scope 不允许 | 走二维码登录，不索取明文凭据 |
+| `plan.*` | Plan 非法、过期或含 secret | 重新生成 Plan，别手改 |
+| `http.*` | 网络或状态码 | 只在 `retryable: true` 时重试 |
+| `download.*` / `resume.*` / `multipart.*` | 传输层 | 通常直接重跑，默认 skip 会保留已完成产物 |
+| `ffmpeg.*` | 缺 ffmpeg 或合并失败 | 提示安装，或用 `--ffmpeg` 指定路径 |
+| `filesystem.*` / `output.*` | 落盘路径问题 | 换 `--output-dir` 或加 `--rename` |
+| `proxy.*` / `config.*` / `cli.*` | 调用方参数错误 | 修正命令后重试 |
+
+高频具体 code：
 
 - `auth.required`：缺少本地 credential
 - `auth.scope_violation`：authRef origin 不允许
-- `platform.drm_unsupported`：DRM，不支持绕过
+- `platform.drm_unsupported`：DRM，直接说明不支持绕过
+- `platform.no_streams`：内容可能已删除、受限或仅 App 可看；抖音可考虑浏览器辅助 fallback
+- `selection.quality_not_found` / `selection.part_out_of_range` / `selection.image_out_of_range`
 - `ffmpeg.not_found` / `ffmpeg.failed`
-- `plan.expired`
-- `plan.secret_header`
-- `proxy.invalid`
+- `plan.expired` / `plan.secret_header`
 - `download.sources_exhausted`
-
-不要通过解析英文 message 判断流程；优先使用稳定错误 code。错误 context 不应包含 Cookie、SESSDATA 或 CDN credential。
+- `http.forbidden` / `http.unauthorized` / `http.rate_limited`
+- `proxy.invalid`
