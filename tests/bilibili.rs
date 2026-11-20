@@ -31,6 +31,8 @@ use zip::ZipArchive;
 
 const BVID: &str = "BV1xx411c7mD";
 const DRM_BVID: &str = "BV1drm411c7mD";
+const SIZED_BVID: &str = "BV1sz411c7mD";
+const CDN_BVID: &str = "BV1cd411c7mD";
 
 #[tokio::test]
 async fn resolves_b23_video_and_lazily_plans_all_dash_parts() {
@@ -48,6 +50,7 @@ async fn resolves_b23_video_and_lazily_plans_all_dash_parts() {
     assert_eq!(inspect.choices.parts.len(), 2);
     assert_eq!(inspect.choices.qualities[0].id, "80");
     assert_eq!(inspect.choices.qualities[0].label, "1080P");
+    assert_eq!(inspect.choices.qualities[0].size, None);
     let inspect_json = serde_json::to_string(&inspect).unwrap();
     assert!(!inspect_json.contains("222-80.m4s"));
 
@@ -130,6 +133,40 @@ async fn resolves_b23_video_and_lazily_plans_all_dash_parts() {
     let expected: Value =
         serde_json::from_str(include_str!("../tests/fixtures/golden/bilibili-video.json")).unwrap();
     assert_eq!(normalized, expected);
+}
+
+#[tokio::test]
+async fn estimates_dash_quality_size_in_bytes_from_timelength() {
+    let server = BiliServer::start().await;
+    let media = server.resolver().resolve(SIZED_BVID).await.unwrap();
+    let inspect = media.inspect();
+    assert_eq!(inspect.choices.qualities[0].id, "80");
+    assert_eq!(inspect.choices.qualities[0].size, Some(1_289_000));
+    assert_eq!(inspect.choices.qualities[1].id, "64");
+    assert_eq!(inspect.choices.qualities[1].size, Some(1_285_000));
+}
+
+#[tokio::test]
+async fn prioritizes_bilibili_upos_cdn_ahead_of_mcdn_and_pcdn_fallbacks() {
+    let server = BiliServer::start().await;
+    let media = server.resolver().resolve(CDN_BVID).await.unwrap();
+    let plan = media.create_plan(&PlanSelection::default()).await.unwrap();
+    let DownloadTask::Mux { tracks, .. } = &plan.tasks[0] else {
+        panic!("video should create a mux task");
+    };
+    let video_urls = tracks[0]
+        .sources
+        .iter()
+        .map(|source| source.url.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        video_urls,
+        [
+            "https://upos-sz-mirrorcoso1.bilivideo.com/upgcxcode/video.m4s",
+            "https://xy1x2x3x4xy.mcdn.bilivideo.cn:8082/upgcxcode/video.m4s",
+            "https://edge.mountaintoys.cn:4483/upgcxcode/video.m4s",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -543,6 +580,16 @@ async fn video_view(
             "BVcol2 标题",
             vec![json!({ "cid": 222, "page": 1, "part": "BVcol2 标题", "duration": 60 })],
         ),
+        SIZED_BVID => (
+            888,
+            "时长估算视频",
+            vec![json!({ "cid": 888, "page": 1, "part": "时长估算视频", "duration": 80 })],
+        ),
+        CDN_BVID => (
+            999,
+            "CDN优先级视频",
+            vec![json!({ "cid": 999, "page": 1, "part": "CDN优先级视频", "duration": 60 })],
+        ),
         _ => (
             111,
             "普通视频",
@@ -605,7 +652,40 @@ async fn video_playurl(
         .get("cid")
         .and_then(|cid| cid.parse().ok())
         .unwrap_or(111);
-    json_response(json!({ "code": 0, "data": play_data(&state.base, cid) }))
+    if cid == 999 {
+        return json_response(json!({
+            "code": 0,
+            "data": {
+                "timelength": 60_000,
+                "accept_quality": [80],
+                "accept_description": ["1080P"],
+                "dash": {
+                    "video": [{
+                        "id": 80,
+                        "baseUrl": "https://xy1x2x3x4xy.mcdn.bilivideo.cn:8082/upgcxcode/video.m4s",
+                        "backupUrl": [
+                            "https://edge.mountaintoys.cn:4483/upgcxcode/video.m4s",
+                            "https://upos-sz-mirrorcoso1.bilivideo.com/upgcxcode/video.m4s"
+                        ],
+                        "bandwidth": 800_000,
+                        "width": 1920,
+                        "height": 1080,
+                        "codecid": 12
+                    }],
+                    "audio": [{
+                        "id": 30280,
+                        "baseUrl": "https://upos-sz-mirrorcoso1.bilivideo.com/upgcxcode/audio.m4s",
+                        "bandwidth": 128_000
+                    }]
+                }
+            }
+        }));
+    }
+    let mut data = play_data(&state.base, cid);
+    if cid == 888 {
+        data["timelength"] = json!(80_000);
+    }
+    json_response(json!({ "code": 0, "data": data }))
 }
 
 async fn bangumi_season(

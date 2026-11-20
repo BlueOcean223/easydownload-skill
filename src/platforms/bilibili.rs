@@ -1487,9 +1487,11 @@ impl BilibiliMedia {
 }
 
 fn build_streams(data: &Item) -> Vec<BiliStream> {
-    let dash = data.get("dash").and_then(Value::as_object);
+    let Some(dash) = data.get("dash").and_then(Value::as_object) else {
+        return Vec::new();
+    };
     let Some(audio) = dash
-        .and_then(|dash| dash.get("audio"))
+        .get("audio")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1503,7 +1505,7 @@ fn build_streams(data: &Item) -> Vec<BiliStream> {
     let audio_bandwidth = positive_u64(audio.get("bandwidth")).unwrap_or_default();
     let mut by_quality = BTreeMap::<u32, Vec<&Item>>::new();
     for video in dash
-        .and_then(|dash| dash.get("video"))
+        .get("video")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1527,18 +1529,34 @@ fn build_streams(data: &Item) -> Vec<BiliStream> {
         }) else {
             continue;
         };
+        let total_bandwidth = positive_u64(video.get("bandwidth"))
+            .unwrap_or_default()
+            .saturating_add(audio_bandwidth);
         streams.push(BiliStream {
             id: quality.to_string(),
             label: quality_name(data, quality),
             width: positive_u32(video.get("width")),
             height: positive_u32(video.get("height")),
-            size: Some(positive_u64(video.get("bandwidth")).unwrap_or_default() + audio_bandwidth),
+            size: estimate_dash_size(data, dash, total_bandwidth),
             video_urls: dash_urls(video),
             audio_urls: audio_urls.clone(),
         });
     }
     streams.sort_by_key(|stream| std::cmp::Reverse(stream.id.parse::<u32>().unwrap_or_default()));
     streams
+}
+
+fn estimate_dash_size(data: &Item, dash: &Item, total_bandwidth: u64) -> Option<u64> {
+    if total_bandwidth == 0 {
+        return None;
+    }
+    if let Some(timelength_ms) = positive_u64(data.get("timelength")) {
+        let bytes = (u128::from(total_bandwidth) * u128::from(timelength_ms)) / 8_000;
+        return u64::try_from(bytes).ok().filter(|&value| value > 0);
+    }
+    let duration_secs = positive_u64(dash.get("duration"))?;
+    let bytes = (u128::from(total_bandwidth) * u128::from(duration_secs)) / 8;
+    u64::try_from(bytes).ok().filter(|&value| value > 0)
 }
 
 fn dash_urls(item: &Item) -> Vec<String> {
@@ -1548,7 +1566,46 @@ fn dash_urls(item: &Item) -> Vec<String> {
     ];
     urls.extend(string_array(item.get("backupUrl")));
     urls.extend(string_array(item.get("backup_url")));
-    unique_strings(urls)
+    let mut urls = unique_strings(urls);
+    if urls.iter().any(|url| is_bilibili_media_cdn_url(url)) {
+        urls.sort_by_key(|url| bilibili_cdn_priority(url));
+    }
+    urls
+}
+
+fn is_bilibili_media_cdn_url(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    host.starts_with("upos-")
+        || domain_matches(&host, "bilivideo.com")
+        || domain_matches(&host, "bilivideo.cn")
+        || domain_matches(&host, "acgvideo.com")
+}
+
+fn bilibili_cdn_priority(raw: &str) -> u8 {
+    let Ok(url) = Url::parse(raw) else {
+        return 2;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return 2;
+    };
+    if host.contains("mcdn.") || domain_matches(&host, "szbdyd.com") {
+        return 3;
+    }
+    if host.starts_with("upos-") {
+        return 0;
+    }
+    if domain_matches(&host, "bilivideo.com") || domain_matches(&host, "acgvideo.com") {
+        return 1;
+    }
+    if url.port().is_some_and(|port| port != 80 && port != 443) {
+        return 3;
+    }
+    2
 }
 
 fn quality_name(data: &Item, quality: u32) -> String {

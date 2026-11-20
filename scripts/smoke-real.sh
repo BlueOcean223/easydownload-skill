@@ -37,7 +37,7 @@ run_platform() {
   [[ -n "$input" ]] || return 0
   ran=$((ran + 1))
   echo "[$platform] inspect" >&2
-  "$BIN" "${common[@]}" inspect "$input" --json > "$workspace/$platform-inspect.json"
+  "$BIN" "${common[@]+"${common[@]}"}" inspect "$input" --json > "$workspace/$platform-inspect.json"
   python3 - "$workspace/$platform-inspect.json" "$platform" <<'PY'
 import json, sys
 path, expected = sys.argv[1:]
@@ -49,7 +49,7 @@ PY
 
   if [[ "$MODE" = "plan" ]]; then
     echo "[$platform] plan" >&2
-    "$BIN" "${common[@]}" plan "$input" > "$workspace/$platform-plan.json"
+    "$BIN" "${common[@]+"${common[@]}"}" plan "$input" > "$workspace/$platform-plan.json"
     python3 - "$workspace/$platform-plan.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))
@@ -62,7 +62,7 @@ PY
   elif [[ "$MODE" = "download" ]]; then
     echo "[$platform] download" >&2
     mkdir -p "$workspace/$platform-output"
-    "$BIN" "${common[@]}" download "$input" \
+    "$BIN" "${common[@]+"${common[@]}"}" download "$input" \
       --output-dir "$workspace/$platform-output" \
       --json > "$workspace/$platform-summary.json"
     python3 - "$workspace/$platform-summary.json" <<'PY'

@@ -131,7 +131,8 @@ impl DownloadExecutor {
             ));
         }
         let mut builder = reqwest::Client::builder()
-            .timeout(options.timeout)
+            .connect_timeout(options.timeout)
+            .read_timeout(options.timeout)
             .redirect(reqwest::redirect::Policy::none());
         if let Some(proxy) = options
             .proxy

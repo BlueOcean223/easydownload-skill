@@ -335,7 +335,7 @@ EASYDL_CONFIG_DIR > XDG_CONFIG_HOME/easydl > ~/.config/easydl
 
 **小红书**
 
-- 完整分享文本、`xhslink.com`、note URL、24 位 note id
+- 完整分享文本、`xhslink.com` / `xhslink.cn`、note URL、24 位 note id
 - 视频、图片、Live Photo sidecar
 - 完整 URL 的 `xsec_token` 等 query 不得删除
 

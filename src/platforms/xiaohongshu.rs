@@ -31,7 +31,7 @@ const MAX_IMAGES: usize = 10_000;
 pub fn matches(input: &str) -> bool {
     static HOST: OnceLock<Regex> = OnceLock::new();
     HOST.get_or_init(|| {
-        Regex::new(r"(?i)(?:^|//)(?:[^/]+\.)?(?:xiaohongshu\.com|xhslink\.com)(?:[/:?#]|$)")
+        Regex::new(r"(?i)(?:^|//)(?:[^/]+\.)?(?:xiaohongshu\.com|xhslink\.(?:com|cn))(?:[/:?#]|$)")
             .expect("valid xiaohongshu host regex")
     })
     .is_match(input)
@@ -336,7 +336,8 @@ impl XiaohongshuResolver {
     }
 
     fn is_short_host(&self, host: &str) -> bool {
-        matches!(host, "xhslink.com" | "www.xhslink.com")
+        domain_matches(host, "xhslink.com")
+            || domain_matches(host, "xhslink.cn")
             || self.extra_short_hosts.iter().any(|allowed| host == allowed)
     }
 }
@@ -1087,16 +1088,68 @@ fn stream_type_rank(value: Option<u32>) -> i32 {
 }
 
 fn extension_from_url(value: &str, fallback: &str) -> String {
-    Url::parse(value)
-        .ok()
-        .and_then(|url| {
-            std::path::Path::new(url.path())
-                .extension()
-                .and_then(|value| value.to_str())
-                .filter(|value| !value.is_empty() && value.len() <= 8)
-                .map(str::to_ascii_lowercase)
+    let Ok(url) = Url::parse(value) else {
+        return fallback.to_owned();
+    };
+    let path = url.path();
+    let (base_path, directive) = match path.rsplit_once('!') {
+        Some((base, directive)) => (base, Some(directive)),
+        None => (path, None),
+    };
+    if let Some(ext) = directive.and_then(format_hint_from_token_str) {
+        return ext.to_owned();
+    }
+    if let Some(ext) = std::path::Path::new(base_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 8
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
-        .unwrap_or_else(|| fallback.to_owned())
+    {
+        return ext.to_ascii_lowercase();
+    }
+    if let Some(ext) = url.query().and_then(format_hint_from_query) {
+        return ext.to_owned();
+    }
+    fallback.to_owned()
+}
+
+fn format_hint_from_token_str(value: &str) -> Option<&'static str> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .find_map(known_media_extension)
+}
+
+fn format_hint_from_query(query: &str) -> Option<&'static str> {
+    let mut segments = query.split(['&', '/', '=']);
+    while let Some(segment) = segments.next() {
+        if segment.eq_ignore_ascii_case("format")
+            && let Some(ext) = segments.next().and_then(known_media_extension)
+        {
+            return Some(ext);
+        }
+    }
+    None
+}
+
+fn known_media_extension(token: &str) -> Option<&'static str> {
+    match token.to_ascii_lowercase().as_str() {
+        "webp" => Some("webp"),
+        "jpg" => Some("jpg"),
+        "jpeg" => Some("jpeg"),
+        "png" => Some("png"),
+        "gif" => Some("gif"),
+        "heic" => Some("heic"),
+        "heif" => Some("heif"),
+        "avif" => Some("avif"),
+        "bmp" => Some("bmp"),
+        "mp4" => Some("mp4"),
+        "mov" => Some("mov"),
+        "webm" => Some("webm"),
+        _ => None,
+    }
 }
 
 fn safe_file_stem(value: &str, fallback: &str) -> String {

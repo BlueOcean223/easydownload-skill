@@ -33,6 +33,13 @@ async fn resolves_redirected_video_and_selects_ranked_streams() {
     let server = XhsServer::start().await;
     let resolver = server.resolver();
     assert!(xiaohongshu::matches("https://xhslink.com/example"));
+    assert!(xiaohongshu::matches("https://xhslink.cn/o/3WtJM5KilSz"));
+    assert!(xiaohongshu::matches(
+        "分享笔记 https://xhslink.cn/o/3WtJM5KilSz 复制打开"
+    ));
+    assert!(!xiaohongshu::matches(
+        "https://evilxhslink.cn/o/3WtJM5KilSz"
+    ));
     assert!(xiaohongshu::matches(NOTE_ID));
 
     let media = resolver
@@ -223,6 +230,30 @@ async fn resolves_bare_note_id_and_reports_blocked_pages() {
     assert_eq!(error.info.code, "auth.required");
 }
 
+#[tokio::test]
+async fn detects_image_extensions_from_xhs_cdn_directives_and_queries() {
+    let server = XhsServer::start().await;
+    let media = server
+        .resolver()
+        .resolve(&format!(
+            "{}/explore/{NOTE_ID}?xsec_token=tok_webp",
+            server.base
+        ))
+        .await
+        .unwrap();
+    let plan = media.create_plan(&PlanSelection::default()).unwrap();
+    let DownloadTask::Archive { entries, .. } = &plan.tasks[0] else {
+        panic!("album should create an archive task");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["01.webp", "02.png", "03.jpg"]
+    );
+}
+
 fn options(output_root: &std::path::Path) -> ExecuteOptions {
     ExecuteOptions {
         output_root: output_root.to_path_buf(),
@@ -365,13 +396,10 @@ async fn note_page(
             .body(Body::from("当前笔记暂时无法浏览"))
             .unwrap();
     }
-    let note = if query
-        .get("xsec_token")
-        .is_some_and(|token| token == "tok123")
-    {
-        video_note(&state.base)
-    } else {
-        image_note(&state.base)
+    let note = match query.get("xsec_token").map(String::as_str) {
+        Some("tok123") => video_note(&state.base),
+        Some("tok_webp") => webp_image_note(&state.base),
+        _ => image_note(&state.base),
     };
     Response::builder()
         .status(StatusCode::OK)
@@ -433,6 +461,32 @@ fn image_note(base: &str) -> serde_json::Value {
                 "urlPre": format!("{base}/image-second-pre.jpg"),
                 "width": 1080,
                 "height": 1440
+            }
+        ]
+    })
+}
+
+fn webp_image_note(base: &str) -> serde_json::Value {
+    json!({
+        "noteId": NOTE_ID,
+        "type": "normal",
+        "title": "格式测试",
+        "user": { "nickname": "作者" },
+        "imageList": [
+            {
+                "urlDefault": format!("{base}/1040g008327e4quju7gkg!nd_dft_wlteh_webp_3"),
+                "width": 1080,
+                "height": 1328
+            },
+            {
+                "urlDefault": format!("{base}/photo?imageView2/2/format/png"),
+                "width": 1080,
+                "height": 1328
+            },
+            {
+                "urlDefault": format!("{base}/plain-image-without-hint"),
+                "width": 1080,
+                "height": 1328
             }
         ]
     })
