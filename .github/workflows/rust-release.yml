@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -80,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -140,7 +140,7 @@ jobs:
           fi
 
       - name: Upload target artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: release/${{ matrix.artifact }}
@@ -153,7 +153,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve and validate version
         env:
@@ -180,7 +180,7 @@ jobs:
           echo "ARCHIVE_VERSION=${VERSION#v}" >> "$GITHUB_ENV"
 
       - name: Download target artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: easydl-*
           path: release/bin
@@ -211,7 +211,7 @@ jobs:
           ls -lh release/bin easydownload-skill-*
 
       - name: Upload complete release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: easydownload-skill-rust-${{ github.sha }}
           path: |
@@ -224,7 +224,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: env.RELEASE_TAG != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: easydownload-skill ${{ env.RELEASE_TAG }}
