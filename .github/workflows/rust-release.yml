@@ -4,15 +4,6 @@ on:
   push:
     tags:
       - "v0.2.*"
-    # Artifact-only RC builds: workflow_dispatch is unavailable until this file exists on main.
-    branches:
-      - rs
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "src/**"
-      - ".github/workflows/rust-release.yml"
   workflow_dispatch:
     inputs:
       tag:

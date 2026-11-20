@@ -3,6 +3,7 @@ name: Rust CI
 on:
   push:
     branches:
+      - main
       - rs
   pull_request:
     paths:
