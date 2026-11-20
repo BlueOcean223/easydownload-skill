@@ -8,7 +8,7 @@
 input → safe inspect → short-lived Plan v2 → executor → NDJSON events / summary
 ```
 
-Rust v0.2 已是本项目唯一实现；当前 `rs` 分支处于五目标 release candidate 验证阶段，验证完成后再切换 stable。
+Rust v0.2 已是本项目唯一实现，提供 macOS、Linux（静态 musl）和 Windows 五目标单文件二进制分发。
 
 ## 能力
 
@@ -204,7 +204,7 @@ cargo build --release --locked
 
 Linux 产物会检查不存在动态 ELF interpreter。每个平台还会实际执行两次 config replacement，用于覆盖原子私有文件写入路径。
 
-workflow 会先运行完整 Rust 测试，再构建和 smoke 五目标；任一目标失败都不会进入 bundle/publish。Linux 产物还会检查不存在动态 ELF interpreter，每个平台都会实际执行两次 config replacement。v2 fixtures 已通过 SHA256 manifest 进入 RC freeze；真实链接 smoke 完成前仍不应创建 stable tag。
+workflow 会先运行完整 Rust 测试，再构建和 smoke 五目标；任一目标失败都不会进入 bundle/publish。v2 contract fixtures 通过 SHA256 manifest 保持冻结。
 
 真实链接 smoke 不进入默认 CI，使用本地 harness，并通过环境变量提供不会提交到仓库的测试链接：
 

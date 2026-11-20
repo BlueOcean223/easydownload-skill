@@ -1,6 +1,6 @@
 # Rust v0.2 development slice
 
-本文档记录 `rs` 分支上的 Rust 实现。当前已完成快手、小红书、抖音与 B站的媒体解析/规划纵向链路，并补齐 file/archive/mux executor 的首批能力：
+本文档记录 `easydl` v0.2 的 Rust 实现，覆盖快手、小红书、抖音与 B站的媒体解析/规划纵向链路，以及 file/archive/mux 统一 executor：
 
 ```text
 快手单视频输入
@@ -62,7 +62,7 @@ cargo run -- execute --config get --json
 - auth、config 和 QR 文件统一通过 private filesystem module 原子替换；Unix 目录为 0700、文件为 0600，Windows 使用 `MoveFileExW` replace/write-through。
 - B站 poll/wait 的公开结果只返回状态和 Cookie 名称，不回显 SESSDATA 或 Cookie 值。
 
-四平台归一化 golden fixtures、v2 contract SHA256 freeze 和五目标 Rust release workflow 已建立。当前主要剩余工作是实际运行 Actions 五目标构建，以及不进入默认 CI 的真实链接 smoke。
+四平台归一化 golden fixtures、v2 contract SHA256 freeze 与五目标 Rust release workflow 均已通过验证。
 
 验证：
 
