@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "platform": "kuaishou",
+  "media": {
+    "id": "3xvideo123",
+    "kind": "video",
+    "title": "Best Goal",
+    "author": "红星新闻",
+    "cover": "https://p23.a.yximgs.com/cover.jpg"
+  },
+  "choices": {
+    "qualities": [
+      {
+        "id": "1080p_hevc",
+        "label": "1080p hevc",
+        "recommended": true,
+        "width": 1080,
+        "height": 1920,
+        "size": 200
+      },
+      {
+        "id": "720p_avc",
+        "label": "720p avc",
+        "recommended": false,
+        "width": 720,
+        "height": 1280,
+        "size": 100
+      }
+    ],
+    "parts": [],
+    "images": []
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}

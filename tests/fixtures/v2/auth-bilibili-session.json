@@ -1,0 +1,6 @@
+{
+  "sessionId": "fixture123",
+  "qrcodeKey": "fixture123",
+  "url": "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=fixture123",
+  "qrPath": "/secure/easydl/qrcode/fixture123.png"
+}

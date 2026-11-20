@@ -1,73 +1,166 @@
 # easydownload-skill
 
-一个 **agent 友好** 的媒体下载工具：解析并下载小红书、抖音、快手、B站的视频 / 图集 / 番剧。
+一个面向 agent 的单文件媒体下载 CLI，支持小红书、抖音、快手和 B站的视频、图集、番剧、合集、课程与付费资料。
 
-核心是 CLI `easydl`，配套一份 `SKILL.md`——把它接入你的 agent（如 OpenClaw、Claude Code），agent 就能读懂「先看信息、再选清晰度、然后下载、最后回报产物路径」这套工作流，并自动遵守安全约定（绝不让你在对话里粘贴 Cookie）。
-
-## 能做什么
-
-- **四个平台**：小红书、抖音、快手、B站。给一段分享文本或链接即可，无需手动指定平台。
-- **多种媒体**：单个视频、图集（打包 ZIP）、B站分P / 番剧 / 合集 / 课程，图集可按序号选图。
-- **去水印 / 选清晰度**：抖音去水印直链；B站可选 1080P+、指定分P、下字幕。
-- **B站登录**：二维码登录，用于高清、大会员或付费内容——全程不需要你手填 SESSDATA。
-- **机器可读输出**：`--json` / `--json-progress`，专为 agent 解析设计；断点续传、多线程分块、失败自动汇总。
-
-## 安装 / 分发包
-
-推荐从 [GitHub Releases](../../releases) 下载预编译包，无需安装 Bun、无需自行打包。
-
-打 tag 发布即可自动构建（见 `.github/workflows/release.yml`）：
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-也可在 Actions 里手动跑 **Release** workflow（可填 tag）。
-
-面向 agent 分发的 zip 只包含三类内容：
+`easydl` 的 v0.2 实现使用 Rust，核心流程固定为：
 
 ```text
-bin/        # 各平台预编译 easydl 二进制
-SKILL.md    # 给 agent 看的 skill 手册
-README.md   # 本说明
+input → safe inspect → short-lived Plan v2 → executor → NDJSON events / summary
 ```
 
-预编译二进制已经内置 Bun runtime 和下载器代码，**使用者不需要安装 Bun，也不需要自行打包**。选择自己的平台二进制，放到 PATH 里并命名为 `easydl` 即可：
+Rust v0.2 已是本项目唯一实现；当前 `rs` 分支处于五目标 release candidate 验证阶段，验证完成后再切换 stable。
+
+## 能力
+
+- 自动识别分享文本、短链、完整链接和平台 ID。
+- 快手视频、单图、横版/竖版图集。
+- 小红书视频、图集和 Live Photo sidecar。
+- 抖音视频、图文、临时 ttwid retry、web detail fallback 和受控清晰度探测。
+- B站普通视频、多P、番剧、合集、series/list、Cheese 课程、字幕和工房 ZIP。
+- DASH video/audio 下载及 ffmpeg 无转码合并。
+- file、archive、mux 三类 Plan v2 task。
+- Range/If-Range 续传、multipart、fallback source、task/chunk 并发。
+- partial ZIP/mux 恢复、原子落盘和安全输出路径。
+- `--json` 最终汇总及 `--json-progress` NDJSON 事件流。
+- B站二维码登录、本地 credential adapter 和逐跳 origin scope 检查。
+
+不支持 DRM 绕过。检测到受保护内容时会返回稳定错误 `platform.drm_unsupported`。
+
+## 四个 CLI 动词
+
+v0.2 只保留四个顶层动词：
 
 ```text
-bin/easydl-darwin-arm64       # macOS Apple Silicon
-bin/easydl-darwin-x64         # macOS Intel
-bin/easydl-linux-x64          # Linux x64
-bin/easydl-linux-arm64        # Linux arm64/aarch64
-bin/easydl-windows-x64.exe    # Windows x64
+inspect   查看安全 metadata 和 selectors
+plan      生成短期、无 secret 的 DownloadPlan v2
+execute   执行 Plan，或管理本地 auth/config 执行环境
+download  plan + execute 的便捷组合
 ```
 
-Linux / macOS 示例：
+### Inspect
 
 ```bash
-chmod +x bin/easydl-darwin-arm64
-cp bin/easydl-darwin-arm64 ~/.local/bin/easydl
-easydl --help
+easydl inspect '<完整分享文本或链接>'
+easydl inspect '<完整分享文本或链接>' --json
 ```
 
-Windows PowerShell 示例：
+Inspect 只包含标题、作者、媒体类型、清晰度、分P和图片 selector，不包含 CDN URL、Cookie 或平台 raw payload。
 
-```powershell
-.\bin\easydl-windows-x64.exe --help
-```
-
-### ffmpeg 是否包含？
-
-**不包含。** `ffmpeg` 体积大、平台差异多，当前分发包不内置。只有 B站 DASH 音视频合并需要它，通常包括 B站高画质、1080P+、4K、HDR、番剧 / PGC 等资源。
-
-请使用者自行安装 ffmpeg，并确保它在 PATH 上，或显式配置：
+### Plan
 
 ```bash
-easydl config set ffmpeg /path/to/ffmpeg
+easydl plan '<链接>' --quality 1080p > plan.json
+easydl plan '<B站多P链接>' --part 2 --quality 80 > plan.json
+easydl plan '<B站合集链接>' --all-parts > plan.json
+easydl plan '<图集链接>' --images 1,3-5 --album-output zip > plan.json
 ```
 
-常见安装方式：
+Plan v2 是低层、短期执行计划。Cookie、SESSDATA、proxy、ffmpeg 路径和输出根目录不会写入 Plan；需要本地登录态时只记录受 scope 约束的 `authRef`。
+
+### Execute
+
+```bash
+easydl execute plan.json --json
+easydl execute plan.json --json-progress
+cat plan.json | easydl execute - --json-progress
+```
+
+不要执行来源不可信的 Plan。虽然 executor 会校验路径、敏感 header、时效和 authRef scope，Plan 仍可触发网络请求。
+
+### Download
+
+```bash
+easydl download '<链接>' --json-progress
+easydl download '<链接>' --quality 1080p --output-dir ./downloads --json
+easydl download '<图集链接>' --images 1-5 --album-output directory --json
+easydl download '<B站合集链接>' --all-parts --ffmpeg /path/to/ffmpeg --json-progress
+```
+
+`download` 内部仍经过同一个 Plan v2 和 executor seam，不维护旁路下载实现。
+
+## B站二维码登录
+
+认证操作通过现有 `execute` 动词暴露，不增加第五个顶层命令：
+
+```bash
+# 创建二维码；返回 sessionId、url 和本地 PNG qrPath
+easydl execute --bilibili-auth create --json
+
+# 单次查询
+easydl execute --bilibili-auth poll --auth-session '<sessionId>' --json
+
+# 阻塞等待扫码完成，默认每 2 秒查询、180 秒超时
+easydl execute --bilibili-auth wait --auth-session '<sessionId>' --json
+
+# 可覆盖等待参数
+easydl execute --bilibili-auth wait \
+  --auth-session '<sessionId>' \
+  --auth-interval-ms 1000 \
+  --auth-timeout-seconds 300 \
+  --json
+
+# 查看或清除本地登录态
+easydl execute --bilibili-auth status --json
+easydl execute --bilibili-auth logout --json
+```
+
+poll/wait 输出只包含状态和已保存 Cookie 的名称，不回显 SESSDATA 或 Cookie 值。登录成功后 credential 写入本地 `auth.json`，Plan 中只出现 `bilibili:default` 引用。
+
+## 配置
+
+执行配置优先级：
+
+```text
+CLI > environment > config.json > defaults
+```
+
+支持的 config key：
+
+- `output-dir`
+- `ffmpeg`
+- `concurrency`
+- `chunk-concurrency`
+
+```bash
+easydl execute --config set --config-key output-dir --config-value ./downloads --json
+easydl execute --config set --config-key ffmpeg --config-value /opt/homebrew/bin/ffmpeg --json
+easydl execute --config set --config-key concurrency --config-value 4 --json
+easydl execute --config get --json
+```
+
+对应环境变量：
+
+- `EASYDL_OUTPUT_DIR`
+- `EASYDL_FFMPEG`
+- `EASYDL_CONCURRENCY`
+- `EASYDL_CHUNK_CONCURRENCY`
+- `EASYDL_PROXY`
+
+配置目录优先级：
+
+```text
+EASYDL_CONFIG_DIR → XDG_CONFIG_HOME/easydl → ~/.config/easydl
+```
+
+`config.json`、`auth.json` 和二维码 PNG 使用原子替换。Unix 配置目录权限为 0700，私有文件为 0600；Windows 替换使用 `MoveFileExW` replace/write-through。
+
+## Cookie 与隐私
+
+- 不要在对话、Plan 或命令行参数中粘贴 Cookie/SESSDATA。
+- 需要外部 Cookie 时，让用户提供本地文件，并用全局 `--cookies PATH`：
+
+  ```bash
+  easydl --cookies /secure/path/cookies.txt download '<链接>' --json
+  ```
+
+- 支持 raw Cookie Header 文件和 Netscape cookies.txt。
+- Netscape Cookie 会按 domain、path、secure 和 expiry 过滤。
+- B站 credential 只会发送到明确 allowlist 中的 HTTPS 标准端口 origin；每次 redirect 都重新检查 scope。
+- Inspect、Plan、progress、summary 和结构化错误不得包含 secret。
+
+## ffmpeg
+
+ffmpeg 不打入主二进制。B站 DASH、番剧和课程通常需要 ffmpeg 合并音视频：
 
 ```bash
 brew install ffmpeg             # macOS
@@ -75,79 +168,65 @@ sudo apt-get install ffmpeg     # Debian / Ubuntu
 winget install Gyan.FFmpeg      # Windows
 ```
 
-### 从源码开发
+然后确保 `ffmpeg` 在 PATH 中，或使用 `--ffmpeg`、`EASYDL_FFMPEG`、config.json 指定。
 
-源码仓库才需要 Bun：
+## 从源码验证
 
-```bash
-bun install
-bun run typecheck
-bun run test
-bun run compile      # 产出当前平台 ./bin/easydl
-bun run compile:all  # 跨平台产出 linux / darwin / windows 二进制到 ./bin/
-```
-
-## 快速上手
+需要 Rust 1.97.1：
 
 ```bash
-# 看看这是什么
-./bin/easydl info '<分享文本或链接>'
-
-# 列出可选清晰度 / 分P / 图集
-./bin/easydl formats '<链接>'
-
-# 下载（默认最佳清晰度，落到当前目录）
-./bin/easydl download '<链接>'
-
-# 指定清晰度和输出目录
-./bin/easydl download --quality 1080p --output-dir ~/Downloads '<链接>'
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --release --locked
 ```
 
-完整参数（清晰度、分P、选图、cookies、代理、覆盖策略等）见 `./bin/easydl download --help`。
-
-## 配置给 Agent 使用
-
-
-### 接入 OpenClaw
-
-1. **准备可执行文件**：从 `bin/` 里选择当前平台二进制，放到 OpenClaw 容器 / 会话能执行到的路径（或加进 PATH），并命名为 `easydl`。运行时还需要 `ffmpeg`（B站 DASH 合并用，不随包内置）。
-2. **喂入 SKILL.md**：把 `SKILL.md` 的内容作为这项下载能力的工具说明 / 系统提示交给 agent。它写成了工作流文档——命令用法、`--json` / `--json-progress` 输出契约、安全规则——不是单纯的命令列表。
-3. **让 agent 按工作流跑**：先 `info` / `formats` 看清楚是什么、有哪些清晰度，再 `download --json-progress`，最后解析 `done` 事件把产物路径回给用户。
-4. **指定安全工作目录**（下一节）：让登录态和配置落到 OpenClaw 自己的目录，而不是散落在系统用户目录。
-
-OpenClaw 一次运行下一个/一组链接即可；几百个 URL 的批量调度由 OpenClaw 侧分批完成，`easydl` 不承担长期队列。
-
-> 遇到 B站链接时，agent 应主动提醒用户：匿名只能拿普通清晰度，1080P+ / 大会员 / 付费内容需要先扫码登录。
-
-### 也支持 Claude Code 等 Skill 类 agent
-
-`SKILL.md` 是标准 skill 格式。把本仓库放进工作目录（项目 skill 自动发现），或软链到全局 skills 目录：
+四个平台 resolver/planner 测试会读取 `tests/fixtures/golden/*.json`，比较归一化后的 platform、media kind、quality、part 和 task/output 语义。Rust contract fixtures 位于 `tests/fixtures/v2/`：
 
 ```bash
-ln -s "$(pwd)" ~/.claude/skills/easydl-downloader
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --release --locked
 ```
 
-之后用户贴链接或说「帮我下这个 B站视频」，agent 就会加载 skill 并调用 `easydl`。
+当前本机 release 二进制为 5,053,504 bytes（gzip 2,466,609 bytes），ffmpeg 不包含在内。
 
-### 配置目录（登录态 / 默认值放哪）
+## Release
 
-`easydl` 的 config 和 B站登录态按以下优先级存放。OpenClaw 应把 `EASYDL_CONFIG_DIR` 指到自己的安全工作目录：
+- `.github/workflows/rust.yml`：Rust 日常验证。
+- `.github/workflows/rust-release.yml`：手动构建 artifact，或在 `v0.2.*` tag 上通过全部验证后发布 GitHub Release：
+  - macOS arm64
+  - macOS x64
+  - Linux x64 musl
+  - Linux arm64 musl
+  - Windows x64 MSVC
 
+Linux 产物会检查不存在动态 ELF interpreter。每个平台还会实际执行两次 config replacement，用于覆盖原子私有文件写入路径。
+
+workflow 会先运行完整 Rust 测试，再构建和 smoke 五目标；任一目标失败都不会进入 bundle/publish。Linux 产物还会检查不存在动态 ELF interpreter，每个平台都会实际执行两次 config replacement。v2 fixtures 已通过 SHA256 manifest 进入 RC freeze；真实链接 smoke 完成前仍不应创建 stable tag。
+
+真实链接 smoke 不进入默认 CI，使用本地 harness，并通过环境变量提供不会提交到仓库的测试链接：
+
+```bash
+EASYDL_SMOKE_KUAISHOU='<real share URL>' \
+EASYDL_SMOKE_XHS='<real share URL>' \
+EASYDL_SMOKE_DOUYIN='<real share URL>' \
+EASYDL_SMOKE_BILIBILI='<real share URL>' \
+EASYDL_SMOKE_MODE=inspect \
+./scripts/smoke-real.sh
 ```
-$EASYDL_CONFIG_DIR  →  $XDG_CONFIG_HOME/easydl  →  ~/.config/easydl
-```
 
-- `config.json`：默认输出目录、ffmpeg 路径、并发数等（`easydl config set <key> <value>`）。
-- `auth.json`：B站 SESSDATA，由二维码登录写入。
+可选 mode 为 `inspect`、`plan` 或 `download`；需要凭据时只传 `EASYDL_SMOKE_COOKIES=/secure/path/cookies.txt`，不要把链接或 credential 写入 workflow/repository fixture。
 
-## 关于登录与隐私
+## Agent 接入
 
-- **绝不在对话或命令行里粘贴 Cookie / SESSDATA。** agent 被明确要求不索取这些。
-- B站高清 / 会员 / 付费内容需要登录：用二维码登录（`easydl auth bilibili login create --json`），agent 会把二维码发给你扫。
-- 若某平台确实需要 cookie，上传一个 `cookies.txt` 文件，用 `--cookies <路径>` 传，路径优先级高于登录态。
-- 本工具只做**解析 + 下载**，不做 DRM 绕过——受保护内容会明确报「不支持」。
+把当前平台的二进制命名为 `easydl` 并放入 PATH，然后把 `SKILL.md` 提供给 agent。Agent 应：
 
-## 文档
+1. 保留用户的完整分享文本/URL。
+2. 先运行 `inspect --json`。
+3. 根据 selector 运行 `download --json-progress`，或先生成/评审 Plan 再 `execute`。
+4. 消费最终 `done` 事件，报告所有 artifact、partial artifact 和 failure。
+5. 需要 B站会员能力时使用二维码登录，不索取明文凭据。
 
-- **`SKILL.md`** — 给 agent 看的运行手册：命令、工作流、输出契约、安全规则。接入 agent 时用这份。
-- 想改代码 / 加平台，从 `SKILL.md` 顶部结构和 `src/core/types.ts` 的 `Platform` 接口入手。
+详细运行规则见 [`SKILL.md`](SKILL.md)，Rust 内部开发说明见 [`docs/rust-development.md`](docs/rust-development.md)。

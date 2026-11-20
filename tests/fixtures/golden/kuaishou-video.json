@@ -1,0 +1,15 @@
+{
+  "platform": "kuaishou",
+  "kind": "video",
+  "title": "Best Goal",
+  "qualityIds": [
+    "1080p_hevc",
+    "720p_avc"
+  ],
+  "tasks": [
+    {
+      "kind": "file",
+      "output": "Best Goal.mp4"
+    }
+  ]
+}

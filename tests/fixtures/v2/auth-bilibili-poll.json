@@ -1,0 +1,11 @@
+{
+  "sessionId": "fixture123",
+  "code": 0,
+  "message": "login successful",
+  "loggedIn": true,
+  "cookieNames": [
+    "SESSDATA",
+    "DedeUserID",
+    "bili_jct"
+  ]
+}

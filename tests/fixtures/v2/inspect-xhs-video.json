@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "platform": "xhs",
+  "media": {
+    "id": "64f123456789abcdef123456",
+    "kind": "video",
+    "title": "视频标题",
+    "author": "作者",
+    "cover": "https://sns-img.example.com/cover.jpg"
+  },
+  "choices": {
+    "qualities": [
+      {
+        "id": "hd_115",
+        "label": "HD h265",
+        "recommended": true,
+        "width": 1280,
+        "height": 720,
+        "size": 200
+      },
+      {
+        "id": "hd_259",
+        "label": "HD h264",
+        "recommended": false,
+        "width": 1280,
+        "height": 720,
+        "size": 300
+      }
+    ],
+    "parts": [],
+    "images": []
+  },
+  "requirements": {
+    "login": false,
+    "ffmpeg": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "platform": "xhs",
+  "kind": "video",
+  "title": "视频标题",
+  "qualityIds": [
+    "hd_115",
+    "hd_259"
+  ],
+  "tasks": [
+    {
+      "kind": "file",
+      "output": "作者_视频标题_64f123456789abcdef123456.mp4"
+    }
+  ]
+}

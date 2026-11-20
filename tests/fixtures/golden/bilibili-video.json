@@ -1,0 +1,31 @@
+{
+  "platform": "bilibili",
+  "kind": "playlist",
+  "title": "普通视频",
+  "qualityIds": [
+    "80",
+    "64"
+  ],
+  "qualityLabels": [
+    "1080P",
+    "720P"
+  ],
+  "partTitles": [
+    "第一P",
+    "第二P"
+  ],
+  "tasks": [
+    {
+      "kind": "mux",
+      "output": "普通视频_P01_第一P.mp4",
+      "video": "111-80.m4s",
+      "audio": "111.m4s"
+    },
+    {
+      "kind": "mux",
+      "output": "普通视频_P02_第二P.mp4",
+      "video": "222-80.m4s",
+      "audio": "222.m4s"
+    }
+  ]
+}

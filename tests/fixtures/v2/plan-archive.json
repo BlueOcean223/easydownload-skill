@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "createdAt": "2026-07-30T00:00:00Z",
+  "expiresAt": "2026-07-30T00:10:00Z",
+  "source": {
+    "platform": "kuaishou",
+    "mediaId": "3xalbum123"
+  },
+  "tasks": [
+    {
+      "kind": "archive",
+      "id": "3xalbum123",
+      "entries": [
+        {
+          "id": "image-1",
+          "path": "01.jpg",
+          "sources": [
+            {
+              "url": "https://cdn.example.com/01.jpg",
+              "headers": {
+                "Referer": "https://v.chenzhongtech.com/"
+              }
+            }
+          ]
+        },
+        {
+          "id": "image-2",
+          "path": "images/02.jpg",
+          "sources": [
+            {
+              "url": "https://cdn.example.com/02.jpg"
+            },
+            {
+              "url": "https://backup.example.com/02.jpg"
+            }
+          ]
+        }
+      ],
+      "output": {
+        "relativePath": "Best Album.zip"
+      }
+    }
+  ]
+}

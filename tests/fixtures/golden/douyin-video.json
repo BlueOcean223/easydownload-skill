@@ -1,0 +1,15 @@
+{
+  "platform": "douyin",
+  "kind": "video",
+  "title": "视频标题",
+  "qualityIds": [
+    "1080p",
+    "720p"
+  ],
+  "tasks": [
+    {
+      "kind": "file",
+      "output": "作者_视频标题_<id>.mp4"
+    }
+  ]
+}
