@@ -237,6 +237,12 @@ impl BilibiliResolver {
 
     async fn resolve_video(&self, id: &str, page: Option<u32>) -> Result<BilibiliMedia> {
         let view = self.fetch_video_view(id).await?;
+        if let Some(redirect_url) = string_value(view.get("redirect_url"))
+            && let Ok(url) = Url::parse(&redirect_url)
+            && let Some(ParsedInput::Bangumi { id_kind, id }) = parse_url_identifier(url)
+        {
+            return self.resolve_bangumi(id_kind, &id).await;
+        }
         let bvid = string_value(view.get("bvid")).unwrap_or_default();
         let aid = positive_u64(view.get("aid"));
         let title = string_value(view.get("title")).unwrap_or_else(|| id.to_owned());
@@ -1490,15 +1496,7 @@ fn build_streams(data: &Item) -> Vec<BiliStream> {
     let Some(dash) = data.get("dash").and_then(Value::as_object) else {
         return Vec::new();
     };
-    let Some(audio) = dash
-        .get("audio")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-        .filter(|audio| !dash_urls(audio).is_empty())
-        .max_by_key(|audio| positive_u64(audio.get("bandwidth")).unwrap_or_default())
-    else {
+    let Some(audio) = best_dash_audio(dash) else {
         return Vec::new();
     };
     let audio_urls = dash_urls(audio);
@@ -1544,6 +1542,31 @@ fn build_streams(data: &Item) -> Vec<BiliStream> {
     }
     streams.sort_by_key(|stream| std::cmp::Reverse(stream.id.parse::<u32>().unwrap_or_default()));
     streams
+}
+
+fn best_dash_audio(dash: &Item) -> Option<&Item> {
+    if let Some(audio) = pick_best_audio_from_array(dash.get("audio")) {
+        return Some(audio);
+    }
+    if let Some(audio) =
+        pick_best_audio_from_array(dash.get("dolby").and_then(|value| value.get("audio")))
+    {
+        return Some(audio);
+    }
+    match dash.get("flac").and_then(|value| value.get("audio")) {
+        Some(Value::Object(audio)) if !dash_urls(audio).is_empty() => Some(audio),
+        other => pick_best_audio_from_array(other),
+    }
+}
+
+fn pick_best_audio_from_array(value: Option<&Value>) -> Option<&Item> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|audio| !dash_urls(audio).is_empty())
+        .max_by_key(|audio| positive_u64(audio.get("bandwidth")).unwrap_or_default())
 }
 
 fn estimate_dash_size(data: &Item, dash: &Item, total_bandwidth: u64) -> Option<u64> {

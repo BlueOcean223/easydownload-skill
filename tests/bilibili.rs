@@ -33,6 +33,8 @@ const BVID: &str = "BV1xx411c7mD";
 const DRM_BVID: &str = "BV1drm411c7mD";
 const SIZED_BVID: &str = "BV1sz411c7mD";
 const CDN_BVID: &str = "BV1cd411c7mD";
+const REDIRECT_BVID: &str = "BV1rd411c7mD";
+const FLAC_BVID: &str = "BV1fl411c7mD";
 
 #[tokio::test]
 async fn resolves_b23_video_and_lazily_plans_all_dash_parts() {
@@ -167,6 +169,22 @@ async fn prioritizes_bilibili_upos_cdn_ahead_of_mcdn_and_pcdn_fallbacks() {
             "https://edge.mountaintoys.cn:4483/upgcxcode/video.m4s",
         ]
     );
+}
+
+#[tokio::test]
+async fn follows_view_redirect_url_to_bangumi_and_falls_back_to_flac_audio() {
+    let server = BiliServer::start().await;
+    let redirected = server.resolver().resolve(REDIRECT_BVID).await.unwrap();
+    let redirected_inspect = redirected.inspect();
+    assert_eq!(redirected_inspect.media.kind, MediaKind::Bangumi);
+    assert_eq!(redirected_inspect.media.title, "番剧标题");
+
+    let flac = server.resolver().resolve(FLAC_BVID).await.unwrap();
+    let flac_plan = flac.create_plan(&PlanSelection::default()).await.unwrap();
+    let DownloadTask::Mux { tracks, .. } = &flac_plan.tasks[0] else {
+        panic!("video should create a mux task");
+    };
+    assert_eq!(tracks[1].sources[0].url, server.url("/audio/flac.m4s"));
 }
 
 #[tokio::test]
@@ -590,6 +608,22 @@ async fn video_view(
             "CDN优先级视频",
             vec![json!({ "cid": 999, "page": 1, "part": "CDN优先级视频", "duration": 60 })],
         ),
+        REDIRECT_BVID => {
+            return json_response(json!({
+                "code": 0,
+                "data": {
+                    "bvid": REDIRECT_BVID,
+                    "aid": 170099,
+                    "title": "重定向番剧",
+                    "redirect_url": "https://www.bilibili.com/bangumi/play/ep123"
+                }
+            }));
+        }
+        FLAC_BVID => (
+            778,
+            "无损音轨视频",
+            vec![json!({ "cid": 778, "page": 1, "part": "无损音轨视频", "duration": 60 })],
+        ),
         _ => (
             111,
             "普通视频",
@@ -677,6 +711,35 @@ async fn video_playurl(
                         "baseUrl": "https://upos-sz-mirrorcoso1.bilivideo.com/upgcxcode/audio.m4s",
                         "bandwidth": 128_000
                     }]
+                }
+            }
+        }));
+    }
+    if cid == 778 {
+        return json_response(json!({
+            "code": 0,
+            "data": {
+                "timelength": 60_000,
+                "accept_quality": [80],
+                "accept_description": ["1080P"],
+                "dash": {
+                    "video": [{
+                        "id": 80,
+                        "baseUrl": format!("{}/media/778-80.m4s", state.base),
+                        "bandwidth": 800_000,
+                        "width": 1920,
+                        "height": 1080,
+                        "codecid": 12
+                    }],
+                    "audio": [],
+                    "flac": {
+                        "display": true,
+                        "audio": {
+                            "id": 30251,
+                            "baseUrl": format!("{}/audio/flac.m4s", state.base),
+                            "bandwidth": 512_000
+                        }
+                    }
                 }
             }
         }));

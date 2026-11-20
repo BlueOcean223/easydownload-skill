@@ -3,15 +3,20 @@ use std::{
     sync::OnceLock,
 };
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use regex::Regex;
-use reqwest::{Response, StatusCode, header::LOCATION, redirect::Policy};
+use reqwest::{
+    Response, StatusCode,
+    header::{CONTENT_TYPE, LOCATION},
+    redirect::Policy,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use url::Url;
 
 use crate::{
+    credentials::CredentialStore,
     domain::{
         ArchiveEntry, DownloadPlan, DownloadSource, DownloadTask, ImageChoice, InspectDocument,
         MediaChoices, MediaKind, MediaRequirements, MediaView, OutputSpec, PlanSource,
@@ -23,16 +28,21 @@ use crate::{
 
 const DEFAULT_BASE_URL: &str = "https://www.xiaohongshu.com/";
 const DEFAULT_REFERER: &str = "https://www.xiaohongshu.com/";
+const DEFAULT_ORIGINAL_IMAGE_BASE: &str = "https://sns-img-bd.xhscdn.com/";
+const DEFAULT_ORIGIN_VIDEO_BASE: &str = "https://sns-video-bd.xhscdn.com/";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 const MAX_NOTE_HTML_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SHORT_HTML_BYTES: usize = 256 * 1024;
 const MAX_IMAGES: usize = 10_000;
+const ORIGINAL_IMAGE_PROBE_CONCURRENCY: usize = 6;
 
 pub fn matches(input: &str) -> bool {
     static HOST: OnceLock<Regex> = OnceLock::new();
     HOST.get_or_init(|| {
-        Regex::new(r"(?i)(?:^|//)(?:[^/]+\.)?(?:xiaohongshu\.com|xhslink\.(?:com|cn))(?:[/:?#]|$)")
-            .expect("valid xiaohongshu host regex")
+        Regex::new(
+            r"(?i)(?:^|//)(?:[^/]+\.)?(?:xiaohongshu\.com|rednote\.com|xhslink\.(?:com|cn))(?:[/:?#]|$)",
+        )
+        .expect("valid xiaohongshu host regex")
     })
     .is_match(input)
         || looks_like_note_id(input.trim())
@@ -50,13 +60,20 @@ pub struct XiaohongshuResolver {
     page_client: reqwest::Client,
     redirect_client: reqwest::Client,
     base_url: Url,
+    original_image_base: Option<Url>,
+    credentials: CredentialStore,
     extra_xhs_hosts: Vec<String>,
     extra_short_hosts: Vec<String>,
 }
 
 impl XiaohongshuResolver {
     pub fn new(options: ResolveOptions) -> Result<Self> {
-        Self::with_endpoints(options, DEFAULT_BASE_URL, &[])
+        let mut resolver = Self::with_endpoints(options, DEFAULT_BASE_URL, &[])?;
+        resolver.original_image_base = Some(
+            Url::parse(DEFAULT_ORIGINAL_IMAGE_BASE)
+                .expect("valid default xiaohongshu original image base"),
+        );
+        Ok(resolver)
     }
 
     pub fn with_endpoints(
@@ -80,9 +97,12 @@ impl XiaohongshuResolver {
         }
         let page_client = build_client(&options, Policy::limited(10))?;
         let redirect_client = build_client(&options, Policy::none())?;
+        let credentials = CredentialStore::new(options.config_dir, options.cookies_path);
         Ok(Self {
             page_client,
             redirect_client,
+            original_image_base: None,
+            credentials,
             extra_xhs_hosts: vec![base_url.host_str().unwrap().to_ascii_lowercase()],
             extra_short_hosts: short_hosts
                 .iter()
@@ -91,6 +111,28 @@ impl XiaohongshuResolver {
                 .collect(),
             base_url,
         })
+    }
+
+    pub fn with_original_image_base(mut self, base_url: &str) -> Result<Self> {
+        let mut parsed = Url::parse(base_url).map_err(|error| {
+            AppError::new(
+                "platform.configuration",
+                format!("invalid xiaohongshu original image base URL: {error}"),
+                false,
+            )
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(AppError::new(
+                "platform.configuration",
+                "xiaohongshu original image base URL must be an HTTP URL with a host",
+                false,
+            ));
+        }
+        if !parsed.path().ends_with('/') {
+            parsed.set_path(&format!("{}/", parsed.path()));
+        }
+        self.original_image_base = Some(parsed);
+        Ok(self)
     }
 
     pub async fn resolve(&self, input: &str) -> Result<XiaohongshuMedia> {
@@ -208,7 +250,7 @@ impl XiaohongshuResolver {
     }
 
     async fn resolve_short_link_once(&self, url: &Url) -> Result<Url> {
-        let response = self
+        let mut request = self
             .redirect_client
             .get(url.clone())
             .header("User-Agent", USER_AGENT)
@@ -216,7 +258,11 @@ impl XiaohongshuResolver {
                 "Accept",
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             )
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+        if let Some(cookie) = self.credentials.explicit_cookie_header_for(url).await? {
+            request = request.header("Cookie", cookie);
+        }
+        let response = request
             .send()
             .await
             .map_err(|error| AppError::http_request(&error))?;
@@ -267,7 +313,7 @@ impl XiaohongshuResolver {
         if let Some(token) = input.xsec_token.as_deref() {
             note_url.query_pairs_mut().append_pair("xsec_token", token);
         }
-        let response = self
+        let mut request = self
             .page_client
             .get(note_url.clone())
             .header("User-Agent", USER_AGENT)
@@ -277,7 +323,15 @@ impl XiaohongshuResolver {
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             )
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            .header("Cache-Control", "max-age=0")
+            .header("Cache-Control", "max-age=0");
+        if let Some(cookie) = self
+            .credentials
+            .explicit_cookie_header_for(&note_url)
+            .await?
+        {
+            request = request.header("Cookie", cookie);
+        }
+        let response = request
             .send()
             .await
             .map_err(|error| AppError::http_request(&error))?;
@@ -323,7 +377,13 @@ impl XiaohongshuResolver {
                 false,
             )
         })?;
-        XiaohongshuMedia::from_note(input.note_id, note, note_url.to_string())
+        XiaohongshuMedia::from_note(
+            input.note_id,
+            note,
+            note_url.to_string(),
+            self.page_client.clone(),
+            self.original_image_base.clone(),
+        )
     }
 
     fn is_acceptable_host(&self, host: &str) -> bool {
@@ -332,6 +392,7 @@ impl XiaohongshuResolver {
 
     fn is_xhs_host(&self, host: &str) -> bool {
         domain_matches(host, "xiaohongshu.com")
+            || domain_matches(host, "rednote.com")
             || self.extra_xhs_hosts.iter().any(|allowed| host == allowed)
     }
 
@@ -369,6 +430,8 @@ pub struct XiaohongshuMedia {
     author: Option<String>,
     cover: Option<String>,
     note_url: String,
+    probe_client: reqwest::Client,
+    original_image_base: Option<Url>,
     kind: XiaohongshuMediaKind,
 }
 
@@ -382,6 +445,7 @@ enum XiaohongshuMediaKind {
 struct XhsImage {
     index: usize,
     urls: Vec<String>,
+    token: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     live_photo_url: Option<String>,
@@ -395,6 +459,7 @@ struct XhsStream {
     height: Option<u32>,
     size: Option<u64>,
     urls: Vec<String>,
+    is_origin: bool,
     stream_type: Option<u32>,
     weight: i64,
     default_stream: i64,
@@ -403,8 +468,9 @@ struct XhsStream {
 }
 
 impl XhsStream {
-    fn rank(&self) -> (u8, i64, i32, i64, u64, u64, u64) {
+    fn rank(&self) -> (bool, u8, i64, i32, i64, u64, u64, u64) {
         (
+            self.is_origin,
             codec_rank(&self.video_codec),
             self.weight,
             stream_type_rank(self.stream_type),
@@ -417,7 +483,13 @@ impl XhsStream {
 }
 
 impl XiaohongshuMedia {
-    fn from_note(id: String, note: XhsNote, note_url: String) -> Result<Self> {
+    fn from_note(
+        id: String,
+        note: XhsNote,
+        note_url: String,
+        probe_client: reqwest::Client,
+        original_image_base: Option<Url>,
+    ) -> Result<Self> {
         let title = first_non_empty([note.title.as_deref(), note.desc.as_deref(), Some(&id)]);
         let author = note.user.as_ref().and_then(|user| {
             let value = first_non_empty([user.nickname.as_deref(), user.name.as_deref()]);
@@ -459,6 +531,8 @@ impl XiaohongshuMedia {
             author,
             cover,
             note_url,
+            probe_client,
+            original_image_base,
             kind,
         })
     }
@@ -517,7 +591,7 @@ impl XiaohongshuMedia {
         }
     }
 
-    pub fn create_plan(&self, selection: &PlanSelection) -> Result<DownloadPlan> {
+    pub async fn create_plan(&self, selection: &PlanSelection) -> Result<DownloadPlan> {
         let tasks = match &self.kind {
             XiaohongshuMediaKind::Video { streams } => {
                 let stream = pick_stream(streams, selection.quality.as_deref().unwrap_or("best"))?;
@@ -534,7 +608,9 @@ impl XiaohongshuMedia {
                     output: OutputSpec { relative_path },
                 }]
             }
-            XiaohongshuMediaKind::Album { images } => self.create_album_tasks(images, selection)?,
+            XiaohongshuMediaKind::Album { images } => {
+                self.create_album_tasks(images, selection).await?
+            }
         };
         let plan = DownloadPlan {
             schema_version: SCHEMA_VERSION,
@@ -550,21 +626,32 @@ impl XiaohongshuMedia {
         Ok(plan)
     }
 
-    fn create_album_tasks(
+    async fn create_album_tasks(
         &self,
         images: &[XhsImage],
         selection: &PlanSelection,
     ) -> Result<Vec<DownloadTask>> {
         let selected = select_images(images, selection.images.as_deref())?;
+        let mut resolved = stream::iter(selected.into_iter().enumerate().map(
+            |(order, image)| async move {
+                let (urls, ext) = self.resolve_image_sources(image).await;
+                (order, image, urls, ext)
+            },
+        ))
+        .buffer_unordered(ORIGINAL_IMAGE_PROBE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        resolved.sort_by_key(|(order, _, _, _)| *order);
+
         match selection.album_output {
             AlbumOutput::Zip => {
                 let mut entries = Vec::new();
-                for image in selected {
+                for (_, image, urls, ext) in resolved {
                     let prefix = format!("{:02}", image.index + 1);
                     entries.push(ArchiveEntry {
                         id: format!("image-{}", image.index + 1),
-                        path: format!("{prefix}.{}", extension_from_url(&image.urls[0], "jpg")),
-                        sources: self.download_sources(&image.urls),
+                        path: format!("{prefix}.{ext}"),
+                        sources: self.download_sources(&urls),
                     });
                     if let Some(url) = image.live_photo_url.as_deref() {
                         entries.push(ArchiveEntry {
@@ -587,16 +674,13 @@ impl XiaohongshuMedia {
             AlbumOutput::Directory => {
                 let directory = selection.output.clone().unwrap_or_else(|| self.file_stem());
                 let mut tasks = Vec::new();
-                for image in selected {
+                for (_, image, urls, ext) in resolved {
                     let prefix = format!("{:02}", image.index + 1);
                     tasks.push(DownloadTask::File {
                         id: format!("{}:image-{}", self.id, image.index + 1),
-                        sources: self.download_sources(&image.urls),
+                        sources: self.download_sources(&urls),
                         output: OutputSpec {
-                            relative_path: format!(
-                                "{directory}/{prefix}.{}",
-                                extension_from_url(&image.urls[0], "jpg")
-                            ),
+                            relative_path: format!("{directory}/{prefix}.{ext}"),
                         },
                     });
                     if let Some(url) = image.live_photo_url.as_deref() {
@@ -615,6 +699,41 @@ impl XiaohongshuMedia {
                 Ok(tasks)
             }
         }
+    }
+
+    async fn resolve_image_sources(&self, image: &XhsImage) -> (Vec<String>, String) {
+        if let (Some(base), Some(token)) =
+            (self.original_image_base.as_ref(), image.token.as_deref())
+            && let Ok(candidate) = base.join(token)
+            && let Some(ext) = self.probe_original_image(&candidate).await
+        {
+            let mut urls = vec![candidate.to_string()];
+            urls.extend(image.urls.iter().cloned());
+            return (unique_strings(urls), ext.to_owned());
+        }
+        (
+            image.urls.clone(),
+            extension_from_url(&image.urls[0], "jpg"),
+        )
+    }
+
+    async fn probe_original_image(&self, url: &Url) -> Option<&'static str> {
+        let response = self
+            .probe_client
+            .head(url.clone())
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", &self.note_url)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())?;
+        image_extension_from_content_type(content_type)
     }
 
     fn single_download_source(&self, url: &str) -> Vec<DownloadSource> {
@@ -682,9 +801,11 @@ fn parse_images(note: &XhsNote) -> Result<Vec<XhsImage>> {
             continue;
         }
         let live_photo = flexible_bool(image.live_photo.as_ref());
+        let token = extract_image_token(image, &urls);
         images.push(XhsImage {
             index: images.len(),
             urls,
+            token,
             width: flexible_u32(image.width.as_ref()),
             height: flexible_u32(image.height.as_ref()),
             live_photo_url: live_photo
@@ -701,52 +822,81 @@ fn parse_images(note: &XhsNote) -> Result<Vec<XhsImage>> {
 }
 
 fn parse_video_streams(note: &XhsNote) -> Vec<XhsStream> {
-    let Some(stream_value) = note
+    let mut best = BTreeMap::<String, XhsStream>::new();
+    if let Some(stream_value) = note
         .video
         .as_ref()
         .and_then(|video| video.media.as_ref())
         .and_then(|media| media.stream.as_ref())
-    else {
-        return Vec::new();
-    };
-    let mut candidates = Vec::<(&Map<String, Value>, Option<&str>)>::new();
-    if let Some(items) = stream_value.as_array() {
-        candidates.extend(
-            items
-                .iter()
-                .filter_map(Value::as_object)
-                .map(|item| (item, None)),
-        );
-    }
-    if let Some(map) = stream_value.as_object() {
-        for (codec, value) in map {
-            let Some(items) = value.as_array() else {
-                continue;
-            };
+    {
+        let mut candidates = Vec::<(&Map<String, Value>, Option<&str>)>::new();
+        if let Some(items) = stream_value.as_array() {
             candidates.extend(
                 items
                     .iter()
                     .filter_map(Value::as_object)
-                    .map(|item| (item, Some(codec.as_str()))),
+                    .map(|item| (item, None)),
             );
         }
-    }
+        if let Some(map) = stream_value.as_object() {
+            for (codec, value) in map {
+                let Some(items) = value.as_array() else {
+                    continue;
+                };
+                candidates.extend(
+                    items
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .map(|item| (item, Some(codec.as_str()))),
+                );
+            }
+        }
 
-    let mut best = BTreeMap::<String, XhsStream>::new();
-    for (data, codec_hint) in candidates {
-        let Some(stream) = parse_stream_candidate(data, codec_hint) else {
-            continue;
-        };
-        let key = stream.id.to_ascii_lowercase();
-        if best
-            .get(&key)
-            .is_none_or(|existing| stream.rank() > existing.rank())
-        {
-            best.insert(key, stream);
+        for (data, codec_hint) in candidates {
+            let Some(stream) = parse_stream_candidate(data, codec_hint) else {
+                continue;
+            };
+            let key = stream.id.to_ascii_lowercase();
+            if best
+                .get(&key)
+                .is_none_or(|existing| stream.rank() > existing.rank())
+            {
+                best.insert(key, stream);
+            }
         }
     }
     let mut streams = best.into_values().collect::<Vec<_>>();
     streams.sort_by_key(|stream| std::cmp::Reverse(stream.rank()));
+
+    if let Some(origin_url) = note
+        .video
+        .as_ref()
+        .and_then(|video| video.consumer.as_ref())
+        .and_then(|consumer| consumer.origin_video_key.as_deref())
+        .and_then(build_origin_video_url)
+    {
+        let mut urls = vec![origin_url];
+        if let Some(top) = streams.first() {
+            urls.extend(top.urls.iter().cloned());
+        }
+        let top = streams.first();
+        let origin = XhsStream {
+            id: "origin".to_owned(),
+            label: "Origin".to_owned(),
+            width: top.and_then(|stream| stream.width),
+            height: top.and_then(|stream| stream.height),
+            size: None,
+            urls: unique_strings(urls),
+            is_origin: true,
+            stream_type: None,
+            weight: 0,
+            default_stream: 0,
+            video_codec: String::new(),
+            video_bitrate: 0,
+        };
+        streams.insert(0, origin);
+    }
+
     streams
 }
 
@@ -788,6 +938,7 @@ fn parse_stream_candidate(
         height: flexible_u32(data.get("height")),
         size: flexible_u64(data.get("size")),
         urls,
+        is_origin: false,
         stream_type,
         weight: flexible_i64(data.get("weight")),
         default_stream: flexible_i64(data.get("defaultStream")),
@@ -938,23 +1089,176 @@ fn initial_state_error() -> AppError {
 }
 
 fn normalize_js_json(value: &str) -> String {
-    let mut output = value.to_owned();
-    let patterns = [
-        (r"([:,\[{]\s*)undefined(\s*[,}\]])", "${1}null${2}"),
-        (r"([:,\[{]\s*)void\s+0(\s*[,}\]])", "${1}null${2}"),
-        (r",\s*([}\]])", "${1}"),
-    ];
-    for (pattern, replacement) in patterns {
-        let regex = Regex::new(pattern).expect("valid JS normalization regex");
-        for _ in 0..10 {
-            let next = regex.replace_all(&output, replacement).into_owned();
-            if next == output {
-                break;
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut prev_sig: Option<u8> = None;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\\' {
+                output.push(byte);
+                index += 1;
+                if index < bytes.len() {
+                    output.push(bytes[index]);
+                    index += 1;
+                }
+                continue;
             }
-            output = next;
+            if byte == b'"' {
+                output.push(byte);
+                in_string = false;
+                prev_sig = Some(b'"');
+                index += 1;
+                continue;
+            }
+            if byte < 0x20 {
+                match byte {
+                    b'\n' => output.extend_from_slice(b"\\n"),
+                    b'\r' => output.extend_from_slice(b"\\r"),
+                    b'\t' => output.extend_from_slice(b"\\t"),
+                    other => output.extend_from_slice(format!("\\u{other:04x}").as_bytes()),
+                }
+                index += 1;
+                continue;
+            }
+            output.push(byte);
+            index += 1;
+            continue;
         }
+
+        if byte == b'"' {
+            output.push(byte);
+            in_string = true;
+            index += 1;
+            continue;
+        }
+
+        if byte == b',' {
+            let mut lookahead = index + 1;
+            while lookahead < bytes.len() && bytes[lookahead].is_ascii_whitespace() {
+                lookahead += 1;
+            }
+            if lookahead < bytes.len() && matches!(bytes[lookahead], b'}' | b']') {
+                index += 1;
+                continue;
+            }
+            output.push(byte);
+            prev_sig = Some(b',');
+            index += 1;
+            continue;
+        }
+
+        if matches!(prev_sig, Some(b':' | b',' | b'[')) {
+            if let Some(end) = skip_js_collection_ctor(bytes, index) {
+                output.extend_from_slice(b"[]");
+                prev_sig = Some(b']');
+                index = end;
+                continue;
+            }
+            if bytes[index..].starts_with(b"undefined")
+                && !bytes.get(index + 9).copied().is_some_and(is_js_ident_byte)
+            {
+                output.extend_from_slice(b"null");
+                prev_sig = Some(b'l');
+                index += 9;
+                continue;
+            }
+            if let Some(end) = skip_void_zero(bytes, index) {
+                output.extend_from_slice(b"null");
+                prev_sig = Some(b'l');
+                index = end;
+                continue;
+            }
+        }
+
+        output.push(byte);
+        if !byte.is_ascii_whitespace() {
+            prev_sig = Some(byte);
+        }
+        index += 1;
     }
-    output
+
+    String::from_utf8(output).expect("sanitized JSON preserves valid UTF-8")
+}
+
+fn is_js_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn skip_void_zero(bytes: &[u8], start: usize) -> Option<usize> {
+    if !bytes[start..].starts_with(b"void") {
+        return None;
+    }
+    let mut index = start + 4;
+    let ws_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index == ws_start || bytes.get(index) != Some(&b'0') {
+        return None;
+    }
+    index += 1;
+    if bytes.get(index).copied().is_some_and(is_js_ident_byte) {
+        return None;
+    }
+    Some(index)
+}
+
+fn skip_js_collection_ctor(bytes: &[u8], start: usize) -> Option<usize> {
+    if !bytes[start..].starts_with(b"new") {
+        return None;
+    }
+    let mut index = start + 3;
+    let ws_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index == ws_start {
+        return None;
+    }
+    if bytes[index..].starts_with(b"Map") || bytes[index..].starts_with(b"Set") {
+        index += 3;
+    } else {
+        return None;
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0_u32;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(q) = quote {
+            if byte == b'\\' {
+                index += 2;
+                continue;
+            }
+            if byte == q {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn lookup_note(mut state: InitialState, note_id: &str) -> Option<XhsNote> {
@@ -1300,6 +1604,88 @@ fn html_unescape(value: &str) -> String {
         .replace("&gt;", ">")
 }
 
+fn extract_image_token(image: &XhsImageData, urls: &[String]) -> Option<String> {
+    if let Some(file_id) = image.file_id.as_deref().and_then(sanitize_xhs_media_token) {
+        return Some(file_id);
+    }
+    for raw in urls {
+        let Ok(url) = Url::parse(raw) else {
+            continue;
+        };
+        let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+            continue;
+        };
+        if !domain_matches(&host, "xhscdn.com") && !domain_matches(&host, "xiaohongshu.com") {
+            continue;
+        }
+        let segments = url
+            .path()
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        if segments.len() >= 3 {
+            let joined = segments[2..].join("/");
+            let without_directive = joined.split('!').next().unwrap_or_default();
+            if let Some(token) = sanitize_xhs_media_token(without_directive) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
+fn sanitize_xhs_media_token(raw: &str) -> Option<String> {
+    let token = raw.trim().trim_start_matches('/');
+    if token.is_empty()
+        || token.contains("://")
+        || token.contains("..")
+        || token.contains('?')
+        || token.contains('#')
+        || token.contains('!')
+        || token.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(token.to_owned())
+}
+
+fn build_origin_video_url(raw_key: &str) -> Option<String> {
+    let trimmed = raw_key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(url) = Url::parse(trimmed)
+        && matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+    {
+        return Some(url.to_string());
+    }
+    let token = sanitize_xhs_media_token(trimmed)?;
+    let base = Url::parse(DEFAULT_ORIGIN_VIDEO_BASE).ok()?;
+    base.join(&token).ok().map(Into::into)
+}
+
+fn image_extension_from_content_type(content_type: &str) -> Option<&'static str> {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match media_type.as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "image/avif" => Some("avif"),
+        "image/gif" => Some("gif"),
+        "image/bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
 fn domain_matches(host: &str, allowed: &str) -> bool {
     host == allowed
         || host
@@ -1350,6 +1736,7 @@ struct XhsUser {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct XhsImageData {
+    file_id: Option<String>,
     url_default: Option<String>,
     url_pre: Option<String>,
     url: Option<String>,
@@ -1369,11 +1756,18 @@ struct XhsUrlInfo {
 #[derive(Debug, Deserialize)]
 struct XhsVideo {
     media: Option<XhsVideoMedia>,
+    consumer: Option<XhsVideoConsumer>,
 }
 
 #[derive(Debug, Deserialize)]
 struct XhsVideoMedia {
     stream: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct XhsVideoConsumer {
+    origin_video_key: Option<String>,
 }
 
 #[derive(Debug)]

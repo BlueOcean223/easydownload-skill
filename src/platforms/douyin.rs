@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::{
+    credentials::CredentialStore,
     domain::{
         ArchiveEntry, DownloadPlan, DownloadSource, DownloadTask, ImageChoice, InspectDocument,
         MediaChoices, MediaKind, MediaRequirements, MediaView, OutputSpec, PlanSource,
@@ -60,6 +61,7 @@ pub struct DouyinResolver {
     page_client: reqwest::Client,
     redirect_client: reqwest::Client,
     endpoints: Endpoints,
+    credentials: CredentialStore,
     extra_douyin_hosts: Vec<String>,
     extra_short_hosts: Vec<String>,
 }
@@ -124,10 +126,14 @@ impl DouyinResolver {
         extra_douyin_hosts: Vec<String>,
         extra_short_hosts: Vec<String>,
     ) -> Result<Self> {
+        let page_client = build_client(&options, Policy::limited(10))?;
+        let redirect_client = build_client(&options, Policy::none())?;
+        let credentials = CredentialStore::new(options.config_dir, options.cookies_path);
         Ok(Self {
-            page_client: build_client(&options, Policy::limited(10))?,
-            redirect_client: build_client(&options, Policy::none())?,
+            page_client,
+            redirect_client,
             endpoints,
+            credentials,
             extra_douyin_hosts,
             extra_short_hosts,
         })
@@ -291,10 +297,12 @@ impl DouyinResolver {
             .share_base
             .join(&format!("{kind}/{aweme_id}/?app=aweme"))
             .map_err(|_| endpoint_error())?;
+        let explicit_cookie = self.credentials.explicit_cookie_header_for(&url).await?;
+        let merged_cookie = merge_cookie_headers(explicit_cookie.as_deref(), cookie);
         let response = self
             .page_client
             .get(url)
-            .headers(page_headers(cookie))
+            .headers(page_headers(merged_cookie.as_deref()))
             .send()
             .await
             .map_err(|error| AppError::http_request(&error))?;
@@ -353,10 +361,16 @@ impl DouyinResolver {
             .append_pair("device_platform", "webapp")
             .append_pair("aid", "6383")
             .append_pair("channel", "channel_pc_web");
+        let mut headers = web_detail_headers(aweme_id);
+        if let Some(cookie) = self.credentials.explicit_cookie_header_for(&url).await?
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(&cookie)
+        {
+            headers.insert(reqwest::header::COOKIE, value);
+        }
         let response = self
             .page_client
             .get(url)
-            .headers(web_detail_headers(aweme_id))
+            .headers(headers)
             .send()
             .await
             .map_err(|error| AppError::http_request(&error))?;
@@ -1348,6 +1362,18 @@ fn build_client(options: &ResolveOptions, redirect: Policy) -> Result<reqwest::C
     builder
         .build()
         .map_err(|error| AppError::http_request(&error))
+}
+
+fn merge_cookie_headers(explicit: Option<&str>, ephemeral: Option<&str>) -> Option<String> {
+    match (
+        explicit.map(str::trim).filter(|value| !value.is_empty()),
+        ephemeral.map(str::trim).filter(|value| !value.is_empty()),
+    ) {
+        (Some(explicit), Some(ephemeral)) => Some(format!("{explicit}; {ephemeral}")),
+        (Some(explicit), None) => Some(explicit.to_owned()),
+        (None, Some(ephemeral)) => Some(ephemeral.to_owned()),
+        (None, None) => None,
+    }
 }
 
 fn parse_endpoint(value: &str) -> Result<Url> {

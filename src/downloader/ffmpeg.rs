@@ -1,5 +1,5 @@
 use std::{
-    io,
+    env, io,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -21,6 +21,16 @@ const STDERR_LIMIT: usize = 8 * 1024;
 pub(super) struct MuxInput {
     pub kind: MuxTrackKind,
     pub path: PathBuf,
+}
+
+pub(super) async fn ensure_available(ffmpeg: &Path) -> Result<()> {
+    if is_executable_present(ffmpeg).await {
+        return Ok(());
+    }
+    Err(
+        AppError::new("ffmpeg.not_found", "ffmpeg executable was not found", false)
+            .with_context("path", ffmpeg.to_string_lossy().to_string()),
+    )
 }
 
 pub(super) async fn mux(
@@ -57,9 +67,11 @@ pub(super) async fn mux(
         };
         command.arg("-map").arg(format!("{index}:{stream}"));
     }
+    command.arg("-c").arg("copy");
+    if format == MuxFormat::Mp4 {
+        command.arg("-movflags").arg("+faststart");
+    }
     command
-        .arg("-c")
-        .arg("copy")
         .arg("-f")
         .arg(format_name(format))
         .arg(&part_path)
@@ -204,4 +216,57 @@ async fn remove_file_if_exists(path: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(AppError::filesystem("remove file", path, &error)),
     }
+}
+
+async fn is_executable_present(ffmpeg: &Path) -> bool {
+    if ffmpeg.components().count() > 1 {
+        return file_exists_with_pathext(ffmpeg, false).await;
+    }
+    let Some(path_env) = env::var_os("PATH") else {
+        return false;
+    };
+    for directory in env::split_paths(&path_env) {
+        if file_exists_with_pathext(&directory.join(ffmpeg), true).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn file_exists_with_pathext(candidate: &Path, require_executable: bool) -> bool {
+    if is_usable_file(candidate, require_executable).await {
+        return true;
+    }
+    #[cfg(windows)]
+    if candidate.extension().is_none() {
+        let pathext = env::var_os("PATHEXT")
+            .unwrap_or_else(|| std::ffi::OsString::from(".COM;.EXE;.BAT;.CMD"));
+        for ext in pathext.to_string_lossy().split(';') {
+            let ext = ext.trim();
+            if ext.is_empty() {
+                continue;
+            }
+            let with_ext = append_suffix(candidate, ext);
+            if is_usable_file(&with_ext, require_executable).await {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn is_usable_file(path: &Path, require_executable: bool) -> bool {
+    let Ok(metadata) = fs::metadata(path).await else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    if require_executable {
+        use std::os::unix::fs::PermissionsExt;
+        return metadata.permissions().mode() & 0o111 != 0;
+    }
+    let _ = require_executable;
+    true
 }

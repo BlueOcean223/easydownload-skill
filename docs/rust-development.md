@@ -46,9 +46,9 @@ cargo run -- execute --config get --json
 - runtime HTTP proxy 已有真实 fake proxy 集成测试，proxy 仍只属于执行环境而不会进入 Plan。
 - 快手 `SINGLE_PICTURE`、`HORIZONTAL_ATLAS`、`VERTICAL_ATLAS` 的安全 inspect 和 Plan v2 planner。
 - `--images 1,3-5` 选择器；图集默认 ZIP，`--album-output directory` 生成独立 file tasks。
-- 小红书分享文本、`xhslink.com` / `xhslink.cn` redirect/HTML fallback、完整 note URL 和裸 24 位 note id。
-- 小红书视频 stream 排序/清晰度选择、图片 backup sources，以及 Live Photo sidecar video。
-- 小红书 initial state 使用有大小上限的流式 HTML 读取，并兼容 `undefined`、`void 0` 和 trailing comma。
+- 小红书分享文本、`xhslink.com` / `xhslink.cn` redirect/HTML fallback、`xiaohongshu.com` / `rednote.com` 完整 note URL 和裸 24 位 note id。
+- 小红书视频 `originVideoKey` 原画与 stream 排序/清晰度选择、无水印原图 HEAD 探测与 backup sources，以及 Live Photo sidecar video。
+- 小红书 initial state 使用有大小上限的流式 HTML 读取，并兼容 `undefined`、`void 0`、`new Map(...)`、`new Set(...)`、裸控制字符和 trailing comma。
 - 抖音分享文本、`v.douyin.com` redirect、video/note/share URL 和 `modal_id` / `aweme_id`。
 - 抖音 share router data、临时 ttwid retry、web detail fallback，以及受源分辨率约束的 ratio probing。
 - 抖音 direct CDN/backup sources、图集 sidecar video、ZIP/directory 和安全 inspect selectors。

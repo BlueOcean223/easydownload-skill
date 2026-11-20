@@ -329,14 +329,14 @@ EASYDL_CONFIG_DIR > XDG_CONFIG_HOME/easydl > ~/.config/easydl
 
 **快手**
 
-- `v.kuaishou.com`、`v.m.chenzhongtech.com/fw/photo/...`、`kuaishou.com/short-video/...`
+- `v.kuaishou.com` / `v.kuaishou.cn`、`v.m.chenzhongtech.com` / `chenzhongtech.cn`、`kuaishou.com/short-video/...`
 - VIDEO、SINGLE_PICTURE、HORIZONTAL_ATLAS、VERTICAL_ATLAS
 - 图集可选图片、ZIP/directory，并可包含背景音乐
 
 **小红书**
 
-- 完整分享文本、`xhslink.com` / `xhslink.cn`、note URL、24 位 note id
-- 视频、图片、Live Photo sidecar
+- 完整分享文本、`xhslink.com` / `xhslink.cn`、`xiaohongshu.com` / `rednote.com`、24 位 note id
+- 视频（优先无水印原画 `originVideoKey`）、图片（自动探测无水印原图并回退）、Live Photo sidecar
 - 完整 URL 的 `xsec_token` 等 query 不得删除
 
 **抖音**

@@ -76,7 +76,7 @@ impl ResolvedMedia {
             Self::Bilibili(media) => media.create_plan(selection).await,
             Self::Douyin(media) => media.create_plan(selection),
             Self::Kuaishou(media) => media.create_plan(selection),
-            Self::Xiaohongshu(media) => media.create_plan(selection),
+            Self::Xiaohongshu(media) => media.create_plan(selection).await,
         }
     }
 }

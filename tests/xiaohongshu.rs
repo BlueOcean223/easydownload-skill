@@ -9,7 +9,7 @@ use axum::{
     Router,
     body::Body,
     extract::{OriginalUri, Query, State},
-    http::{Response, StatusCode},
+    http::{HeaderMap, Response, StatusCode, header},
     response::Redirect,
     routing::get,
 };
@@ -34,6 +34,9 @@ async fn resolves_redirected_video_and_selects_ranked_streams() {
     let resolver = server.resolver();
     assert!(xiaohongshu::matches("https://xhslink.com/example"));
     assert!(xiaohongshu::matches("https://xhslink.cn/o/3WtJM5KilSz"));
+    assert!(xiaohongshu::matches(
+        "https://www.rednote.com/explore/64f123456789abcdef123456"
+    ));
     assert!(xiaohongshu::matches(
         "分享笔记 https://xhslink.cn/o/3WtJM5KilSz 复制打开"
     ));
@@ -68,7 +71,7 @@ async fn resolves_redirected_video_and_selects_ranked_streams() {
             .any(|request| request == &format!("/explore/{NOTE_ID}?xsec_token=tok123"))
     );
 
-    let best = media.create_plan(&PlanSelection::default()).unwrap();
+    let best = media.create_plan(&PlanSelection::default()).await.unwrap();
     let DownloadTask::File {
         sources, output, ..
     } = &best.tasks[0]
@@ -95,6 +98,7 @@ async fn resolves_redirected_video_and_selects_ranked_streams() {
             quality: Some("hd_259".to_owned()),
             ..PlanSelection::default()
         })
+        .await
         .unwrap();
     let DownloadTask::File { sources, .. } = &h264.tasks[0] else {
         panic!("video should create a file task");
@@ -143,6 +147,7 @@ async fn resolves_html_fallback_album_with_live_photo_outputs() {
             images: Some(vec![1]),
             ..PlanSelection::default()
         })
+        .await
         .unwrap();
     let DownloadTask::Archive { entries, .. } = &selected.tasks[0] else {
         panic!("album should create an archive task");
@@ -160,6 +165,7 @@ async fn resolves_html_fallback_album_with_live_photo_outputs() {
             images: Some(vec![0]),
             ..PlanSelection::default()
         })
+        .await
         .unwrap();
     let DownloadTask::Archive {
         entries, output, ..
@@ -204,6 +210,7 @@ async fn resolves_html_fallback_album_with_live_photo_outputs() {
             album_output: AlbumOutput::Directory,
             ..PlanSelection::default()
         })
+        .await
         .unwrap();
     assert_eq!(directory.tasks.len(), 2);
     assert_eq!(
@@ -241,7 +248,7 @@ async fn detects_image_extensions_from_xhs_cdn_directives_and_queries() {
         ))
         .await
         .unwrap();
-    let plan = media.create_plan(&PlanSelection::default()).unwrap();
+    let plan = media.create_plan(&PlanSelection::default()).await.unwrap();
     let DownloadTask::Archive { entries, .. } = &plan.tasks[0] else {
         panic!("album should create an archive task");
     };
@@ -252,6 +259,98 @@ async fn detects_image_extensions_from_xhs_cdn_directives_and_queries() {
             .collect::<Vec<_>>(),
         ["01.webp", "02.png", "03.jpg"]
     );
+}
+
+#[tokio::test]
+async fn upgrades_images_to_original_cdn_and_parses_origin_video_and_js_state() {
+    let server = XhsServer::start().await;
+    let config_dir = tempdir().unwrap();
+    tokio::fs::write(
+        config_dir.path().join("auth.json"),
+        r#"{"bilibili":{"sessData":"bili-secret"}}"#,
+    )
+    .await
+    .unwrap();
+    let cookies_path = config_dir.path().join("xhs-cookies.txt");
+    tokio::fs::write(&cookies_path, "web_session=xhs-secret-token")
+        .await
+        .unwrap();
+
+    let resolver = XiaohongshuResolver::with_endpoints(
+        ResolveOptions {
+            proxy: None,
+            timeout: Duration::from_secs(5),
+            cookies_path: Some(cookies_path),
+            config_dir: config_dir.path().to_path_buf(),
+        },
+        &server.base,
+        &["localhost"],
+    )
+    .unwrap()
+    .with_original_image_base(&server.url("/orig/"))
+    .unwrap();
+
+    let album = resolver
+        .resolve(&format!(
+            "{}/explore/{NOTE_ID}?xsec_token=tok_orig_album",
+            server.base
+        ))
+        .await
+        .unwrap();
+    let inspect = album.inspect();
+    assert_eq!(inspect.media.title, "第一行\n第二行 new Map([])");
+    let inspect_json = serde_json::to_string(&inspect).unwrap();
+    assert!(!inspect_json.contains("xhs-secret-token"));
+    assert!(!inspect_json.contains("bili-secret"));
+
+    let plan = album.create_plan(&PlanSelection::default()).await.unwrap();
+    let plan_json = serde_json::to_string(&plan).unwrap();
+    assert!(!plan_json.contains("xhs-secret-token"));
+    assert!(!plan_json.contains("bili-secret"));
+    let DownloadTask::Archive { entries, .. } = &plan.tasks[0] else {
+        panic!("album should create an archive task");
+    };
+    assert_eq!(entries[0].path, "01.png");
+    assert_eq!(entries[0].sources[0].url, server.url("/orig/tok_png_ok"));
+    assert_eq!(
+        entries[0].sources[1].url,
+        server.url("/1040g008327e4quju7gkg!nd_dft_wlteh_webp_3")
+    );
+    assert_eq!(entries[1].path, "02.webp");
+    assert_eq!(
+        entries[1].sources[0].url,
+        server.url("/1040g008327e4quju7gkg!nd_dft_wlteh_webp_3")
+    );
+    assert!(
+        server
+            .cookies()
+            .iter()
+            .any(|cookie| cookie == "web_session=xhs-secret-token")
+    );
+    assert!(
+        server
+            .cookies()
+            .iter()
+            .all(|cookie| !cookie.contains("bili-secret"))
+    );
+
+    let video = resolver
+        .resolve(&format!(
+            "{}/explore/{NOTE_ID}?xsec_token=tok_origin_video",
+            server.base
+        ))
+        .await
+        .unwrap();
+    assert_eq!(video.inspect().choices.qualities[0].id, "origin");
+    let video_plan = video.create_plan(&PlanSelection::default()).await.unwrap();
+    let DownloadTask::File { sources, .. } = &video_plan.tasks[0] else {
+        panic!("video should create a file task");
+    };
+    assert_eq!(
+        sources[0].url,
+        "https://sns-video-bd.xhscdn.com/stream/origin-key.mp4"
+    );
+    assert_eq!(sources[1].url, server.url("/video-h265.mp4"));
 }
 
 fn options(output_root: &std::path::Path) -> ExecuteOptions {
@@ -281,11 +380,13 @@ fn read_archive(path: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
 struct XhsState {
     base: String,
     requests: Arc<Mutex<Vec<String>>>,
+    cookies: Arc<Mutex<Vec<String>>>,
 }
 
 struct XhsServer {
     base: String,
     requests: Arc<Mutex<Vec<String>>>,
+    cookies: Arc<Mutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
 
@@ -294,9 +395,11 @@ impl XhsServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let cookies = Arc::new(Mutex::new(Vec::new()));
         let state = XhsState {
             base: base.clone(),
             requests: Arc::clone(&requests),
+            cookies: Arc::clone(&cookies),
         };
         let app = Router::new()
             .route(
@@ -315,6 +418,17 @@ impl XhsServer {
             )
             .route("/album", get(album_short_page))
             .route("/explore/{id}", get(note_page))
+            .route(
+                "/orig/tok_png_ok",
+                get(|| async {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "image/png")
+                        .body(Body::from("png-original"))
+                        .unwrap()
+                }),
+            )
+            .route("/orig/tok_missing", get(|| async { StatusCode::NOT_FOUND }))
             .route("/video-h265.mp4", get(|| async { "h265-video" }))
             .route("/video-h264.mp4", get(|| async { "h264-video" }))
             .route(
@@ -336,6 +450,7 @@ impl XhsServer {
         Self {
             base,
             requests,
+            cookies,
             task,
         }
     }
@@ -364,6 +479,10 @@ impl XhsServer {
     fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
+
+    fn cookies(&self) -> Vec<String> {
+        self.cookies.lock().unwrap().clone()
+    }
 }
 
 impl Drop for XhsServer {
@@ -386,9 +505,16 @@ async fn album_short_page(State(state): State<XhsState>) -> Response<Body> {
 async fn note_page(
     State(state): State<XhsState>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Response<Body> {
     state.requests.lock().unwrap().push(uri.to_string());
+    if let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    {
+        state.cookies.lock().unwrap().push(cookie.to_owned());
+    }
     let id = uri.path().rsplit('/').next().unwrap_or_default();
     if id == "aaaaaaaaaaaaaaaaaaaaaaaa" {
         return Response::builder()
@@ -396,15 +522,17 @@ async fn note_page(
             .body(Body::from("当前笔记暂时无法浏览"))
             .unwrap();
     }
-    let note = match query.get("xsec_token").map(String::as_str) {
-        Some("tok123") => video_note(&state.base),
-        Some("tok_webp") => webp_image_note(&state.base),
-        _ => image_note(&state.base),
+    let html = match query.get("xsec_token").map(String::as_str) {
+        Some("tok123") => initial_state_html(id, video_note(&state.base)),
+        Some("tok_webp") => initial_state_html(id, webp_image_note(&state.base)),
+        Some("tok_orig_album") => js_quirks_state_html(id, orig_album_note(&state.base)),
+        Some("tok_origin_video") => initial_state_html(id, origin_video_note(&state.base)),
+        _ => initial_state_html(id, image_note(&state.base)),
     };
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/html; charset=utf-8")
-        .body(Body::from(initial_state_html(id, note)))
+        .body(Body::from(html))
         .unwrap()
 }
 
@@ -490,6 +618,49 @@ fn webp_image_note(base: &str) -> serde_json::Value {
             }
         ]
     })
+}
+
+fn orig_album_note(base: &str) -> serde_json::Value {
+    json!({
+        "noteId": NOTE_ID,
+        "type": "normal",
+        "title": "第一行\n第二行 new Map([])",
+        "user": { "nickname": "作者" },
+        "imageList": [
+            {
+                "fileId": "tok_png_ok",
+                "urlDefault": format!("{base}/1040g008327e4quju7gkg!nd_dft_wlteh_webp_3"),
+                "width": 1131,
+                "height": 1391
+            },
+            {
+                "fileId": "tok_missing",
+                "urlDefault": format!("{base}/1040g008327e4quju7gkg!nd_dft_wlteh_webp_3"),
+                "width": 1080,
+                "height": 1328
+            }
+        ]
+    })
+}
+
+fn origin_video_note(base: &str) -> serde_json::Value {
+    let mut note = video_note(base);
+    note["video"]["consumer"] = json!({ "originVideoKey": "stream/origin-key.mp4" });
+    note
+}
+
+fn js_quirks_state_html(id: &str, note: serde_json::Value) -> String {
+    let mut state = json!({
+        "note": { "noteDetailMap": { id: { "note": note } } }
+    })
+    .to_string();
+    // Simulate raw unescaped newline inside a JSON string plus JS Map/Set constructors.
+    state = state.replace("第一行\\n第二行", "第一行\n第二行");
+    state.pop();
+    state.push_str(
+        r#","mapField":new Map([]),"setField":new Set([1, 2]),"voidField":void 0,"unused":undefined,}"#,
+    );
+    format!("<html><script>window.__INITIAL_STATE__={state};</script></html>")
 }
 
 fn initial_state_html(id: &str, note: serde_json::Value) -> String {

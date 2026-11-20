@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::{
+    credentials::CredentialStore,
     domain::{
         ArchiveEntry, DownloadPlan, DownloadSource, DownloadTask, ImageChoice, InspectDocument,
         MediaChoices, MediaKind, MediaRequirements, MediaView, OutputSpec, PlanSource,
@@ -27,7 +28,7 @@ pub fn matches(input: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN
         .get_or_init(|| {
-            Regex::new(r"(?i)(?:^|//)(?:[^/]+\.)?(?:kuaishou\.com|kwai\.com|chenzhongtech\.com|gifshow\.com)(?:[/:?#]|$)")
+            Regex::new(r"(?i)(?:^|//)(?:[^/]+\.)?(?:kuaishou\.(?:com|cn)|kwai\.com|chenzhongtech\.(?:com|cn)|gifshow\.com)(?:[/:?#]|$)")
                 .expect("valid kuaishou host regex")
         })
         .is_match(input)
@@ -45,6 +46,7 @@ pub fn looks_like_bare_photo_id(value: &str) -> bool {
 pub struct KuaishouResolver {
     client: reqwest::Client,
     api_url: Url,
+    credentials: CredentialStore,
 }
 
 impl KuaishouResolver {
@@ -76,7 +78,12 @@ impl KuaishouResolver {
                 false,
             )
         })?;
-        Ok(Self { client, api_url })
+        let credentials = CredentialStore::new(options.config_dir, options.cookies_path);
+        Ok(Self {
+            client,
+            api_url,
+            credentials,
+        })
     }
 
     pub async fn resolve(&self, input: &str) -> Result<KuaishouMedia> {
@@ -102,11 +109,19 @@ impl KuaishouResolver {
         })?;
 
         for _ in 0..6 {
-            let response = self
+            let mut request = self
                 .client
                 .get(current.clone())
                 .header("User-Agent", MOBILE_USER_AGENT)
-                .header("Referer", REFERER)
+                .header("Referer", REFERER);
+            if let Some(cookie) = self
+                .credentials
+                .explicit_cookie_header_for(&current)
+                .await?
+            {
+                request = request.header("Cookie", cookie);
+            }
+            let response = request
                 .send()
                 .await
                 .map_err(|error| AppError::http_request(&error))?;
@@ -151,12 +166,20 @@ impl KuaishouResolver {
     }
 
     async fn fetch_photo_info(&self, photo_id: &str) -> Result<KuaishouApiResponse> {
-        let response = self
+        let mut request = self
             .client
             .post(self.api_url.clone())
             .header("User-Agent", MOBILE_USER_AGENT)
             .header("Referer", REFERER)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+        if let Some(cookie) = self
+            .credentials
+            .explicit_cookie_header_for(&self.api_url)
+            .await?
+        {
+            request = request.header("Cookie", cookie);
+        }
+        let response = request
             .json(&serde_json::json!({
                 "photoId": photo_id,
                 "subBiz": "BROWSE_SLIDE_PHOTO",

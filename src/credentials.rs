@@ -43,10 +43,17 @@ impl CredentialStore {
         })
     }
 
-    pub(crate) async fn cookie_header_for(&self, url: &Url) -> Result<Option<String>> {
+    pub(crate) async fn explicit_cookie_header_for(&self, url: &Url) -> Result<Option<String>> {
         if let Some(path) = self.cookies_path.as_deref()
             && let Ok(Some(header)) = load_cookie_file(path, url).await
         {
+            return Ok(Some(header));
+        }
+        Ok(None)
+    }
+
+    pub(crate) async fn cookie_header_for(&self, url: &Url) -> Result<Option<String>> {
+        if let Some(header) = self.explicit_cookie_header_for(url).await? {
             return Ok(Some(header));
         }
         self.load_stored_bilibili_cookie().await

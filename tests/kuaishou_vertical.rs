@@ -6,6 +6,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::State,
+    http::{HeaderMap, header},
     response::Redirect,
     routing::{get, post},
 };
@@ -240,13 +241,62 @@ async fn file_task_uses_backup_source_and_reports_structured_failure() {
     );
 }
 
+#[tokio::test]
+async fn matches_cn_domains_and_sends_explicit_cookies_without_leaking_bilibili_auth() {
+    assert!(easydl::platforms::kuaishou::matches(
+        "https://v.kuaishou.cn/abc123"
+    ));
+    assert!(easydl::platforms::kuaishou::matches(
+        "https://v.m.chenzhongtech.cn/fw/photo/3xvideo123"
+    ));
+
+    let server = TestServer::start().await;
+    let config_dir = tempdir().unwrap();
+    tokio::fs::write(
+        config_dir.path().join("auth.json"),
+        r#"{"bilibili":{"sessData":"bili-only-secret"}}"#,
+    )
+    .await
+    .unwrap();
+    let cookies_path = config_dir.path().join("ks-cookies.txt");
+    tokio::fs::write(&cookies_path, "did=ks-user-cookie")
+        .await
+        .unwrap();
+    let resolver = KuaishouResolver::with_api_url(
+        ResolveOptions {
+            proxy: None,
+            timeout: Duration::from_secs(5),
+            cookies_path: Some(cookies_path),
+            config_dir: config_dir.path().to_path_buf(),
+        },
+        &format!("{}/rest/wd/ugH5App/photo/simple/info", server.base),
+    )
+    .unwrap();
+    let media = resolver.resolve("3xvideo123").await.unwrap();
+    let plan = media.create_plan(&PlanSelection::default()).unwrap();
+    assert!(
+        !serde_json::to_string(&plan)
+            .unwrap()
+            .contains("ks-user-cookie")
+    );
+    let cookies = server.cookies();
+    assert!(cookies.iter().any(|cookie| cookie == "did=ks-user-cookie"));
+    assert!(
+        cookies
+            .iter()
+            .all(|cookie| !cookie.contains("bili-only-secret"))
+    );
+}
+
 #[derive(Clone)]
 struct TestState {
     base: String,
+    cookies: Arc<Mutex<Vec<String>>>,
 }
 
 struct TestServer {
     base: String,
+    cookies: Arc<Mutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
 
@@ -255,7 +305,11 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let base = format!("http://{address}");
-        let state = TestState { base: base.clone() };
+        let cookies = Arc::new(Mutex::new(Vec::new()));
+        let state = TestState {
+            base: base.clone(),
+            cookies: Arc::clone(&cookies),
+        };
         let app = Router::new()
             .route("/rest/wd/ugH5App/photo/simple/info", post(photo_info))
             .route(
@@ -269,7 +323,15 @@ impl TestServer {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        Self { base, task }
+        Self {
+            base,
+            cookies,
+            task,
+        }
+    }
+
+    fn cookies(&self) -> Vec<String> {
+        self.cookies.lock().unwrap().clone()
     }
 }
 
@@ -279,7 +341,13 @@ impl Drop for TestServer {
     }
 }
 
-async fn photo_info(State(state): State<TestState>) -> Json<serde_json::Value> {
+async fn photo_info(State(state): State<TestState>, headers: HeaderMap) -> Json<serde_json::Value> {
+    if let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    {
+        state.cookies.lock().unwrap().push(cookie.to_owned());
+    }
     Json(json!({
         "result": 1,
         "photo": {

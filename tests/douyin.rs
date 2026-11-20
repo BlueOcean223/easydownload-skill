@@ -294,6 +294,51 @@ async fn does_not_plan_unplayable_play_endpoint_urls() {
     assert!(error.info.message.contains("no playable video URL"));
 }
 
+#[tokio::test]
+async fn sends_explicit_cookies_without_leaking_stored_bilibili_auth() {
+    let server = DouyinServer::start().await;
+    let config_dir = tempdir().unwrap();
+    tokio::fs::write(
+        config_dir.path().join("auth.json"),
+        r#"{"bilibili":{"sessData":"bili-only-secret"}}"#,
+    )
+    .await
+    .unwrap();
+    let cookies_path = config_dir.path().join("douyin-cookies.txt");
+    tokio::fs::write(&cookies_path, "sessionid=dy-user-cookie")
+        .await
+        .unwrap();
+    let resolver = DouyinResolver::with_base_url(
+        ResolveOptions {
+            proxy: None,
+            timeout: Duration::from_secs(5),
+            cookies_path: Some(cookies_path),
+            config_dir: config_dir.path().to_path_buf(),
+        },
+        &server.base,
+        &["localhost"],
+    )
+    .unwrap();
+    let media = resolver
+        .resolve(&server.url(&format!("/video/{WEB_DETAIL_ID}")))
+        .await
+        .unwrap();
+    let plan = media.create_plan(&PlanSelection::default()).unwrap();
+    let plan_json = serde_json::to_string(&plan).unwrap();
+    assert!(!plan_json.contains("dy-user-cookie"));
+    assert!(!plan_json.contains("bili-only-secret"));
+    let requests = server.requests();
+    assert!(requests.iter().any(|request| {
+        request.contains(&format!("aweme_id={WEB_DETAIL_ID}"))
+            && request.contains("cookie=sessionid=dy-user-cookie")
+    }));
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.contains("bili-only-secret"))
+    );
+}
+
 fn options(output_root: &std::path::Path) -> ExecuteOptions {
     ExecuteOptions {
         output_root: output_root.to_path_buf(),

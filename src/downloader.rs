@@ -446,6 +446,8 @@ impl DownloadExecutor {
             }
         };
 
+        ffmpeg::ensure_available(&self.options.ffmpeg).await?;
+
         let parts_dir = append_suffix(&target, ".parts");
         ensure_parts_directory(&parts_dir).await?;
         let parts_root = fs::canonicalize(&parts_dir)

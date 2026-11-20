@@ -72,6 +72,10 @@ printf muxed > "$last"
     assert!(args.contains(&"0:v:0"));
     assert!(args.contains(&"1:a:0"));
     assert!(args.windows(2).any(|pair| pair == ["-c", "copy"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-movflags", "+faststart"])
+    );
     assert!(args.windows(2).any(|pair| pair == ["-f", "mp4"]));
     assert!(args.iter().all(|arg| !arg.starts_with("http://")));
 
@@ -163,6 +167,8 @@ async fn reports_missing_ffmpeg_with_a_stable_error_code() {
     assert_eq!(summary.failures.len(), 1);
     assert_eq!(summary.failures[0].task_id, "mux");
     assert_eq!(summary.failures[0].error.code, "ffmpeg.not_found");
+    assert_eq!(server.hits("video"), 0);
+    assert_eq!(server.hits("audio"), 0);
     assert!(!output.path().join("merged.mp4").exists());
 }
 
